@@ -446,6 +446,28 @@ const HAND_SIZE = 7;
 const cardOf = id => ({ id, s: Math.floor(id / 13), r: (id % 13) + 1 });
 const cname = c => RANKS[c.r] + SUITS[c.s];
 const cardPts = c => c.r === 1 ? 15 : c.r >= 10 ? 10 : 5;
+const ptsOf = ids => ids.reduce((a, id) => a + cardPts(cardOf(id)), 0);
+
+// best 3-or-4-of-a-kind hiding anywhere in the pile (Remi call), or null
+function findPileRemi(pile) {
+  const byRank = {};
+  pile.forEach(id => { const r = cardOf(id).r; (byRank[r] = byRank[r] || []).push(id); });
+  let best = null;
+  for (const r in byRank) {
+    const g = byRank[r].slice(0, 4);
+    if (g.length >= 3) {
+      const val = ptsOf(g);
+      if (!best || val > best.val) best = { ids: g, val };
+    }
+  }
+  return best;
+}
+
+// every card should exist in exactly one place (one deck, no duplicates)
+function deckIntact(s) {
+  const all = [...s.stock, ...s.pile, ...s.hands[0], ...s.hands[1], ...s.melds.flatMap(m => m.cards)];
+  return new Set(all).size === all.length;
+}
 const cnameId = id => cname(cardOf(id));
 
 // A valid meld is a set (3-4 same rank, distinct suits) or a run (3+ same suit,
@@ -624,11 +646,17 @@ function handleMsg(m) {
   if (m.t === 'bye' && m.seat !== ME.seat) { partnerSeenAt = 0; renderPresence(); return; }
   if (m.t !== 'state' || !m.s) return;
   gotRemoteState = true;
-  if (S && m.v <= S.v) return;
+  if (S && m.v < S.v) return;
+  if (S && m.v === S.v) {
+    // simultaneous out-of-turn publishes (Remi calls) can collide on a
+    // version; everyone deterministically keeps seat 0's copy
+    if (m.from === ME.clientId || m.seat !== 0 || ME.seat === 0) return;
+  }
   const prevTurn = S ? S.turn : null;
   const prevPhase = S ? S.phase : null;
   S = m.s;
   if (!S.scores) { S.scores = [0, 0]; S.history = []; }
+  if (!S.roundPts) S.roundPts = [0, 0];
   lsSet(cacheKey(), S);
   // a joiner may need to claim their seat
   claimSeatIfNeeded();
@@ -669,7 +697,7 @@ function initialState(code, name, avatar) {
       hearts: [0, 0], scores: [0, 0], history: [], roundNo: 0, starter: 0,
       phase: 'lobby',
       stock: [], pile: [], hands: [[], []], melds: [],
-      turn: 0, tphase: 'draw', tookFromPile: null, mustPlay: null,
+      turn: 0, tphase: 'draw', tookFromPile: null, mustPlay: null, roundPts: [0, 0],
       lastAction: null, winner: null,
     };
   }
@@ -679,7 +707,7 @@ function initialState(code, name, avatar) {
     hearts: [0, 0], scores: [0, 0], history: [], roundNo: 0, starter: 0,
     phase: 'lobby',
     stock: [], pile: [], hands: [[], []], melds: [],
-    turn: 0, tphase: 'draw', tookFromPile: null, mustPlay: null,
+    turn: 0, tphase: 'draw', tookFromPile: null, mustPlay: null, roundPts: [0, 0],
     lastAction: null, winner: null,
   };
 }
@@ -692,7 +720,7 @@ function deal(starter) {
   Object.assign(S, {
     phase: 'playing',
     stock: deck, pile: [flip], hands, melds: [],
-    turn: starter, tphase: 'draw', tookFromPile: null, mustPlay: null,
+    turn: starter, tphase: 'draw', tookFromPile: null, mustPlay: null, roundPts: [0, 0],
     starter, winner: null,
     roundNo: S.roundNo + 1,
     lastAction: `${S.players[starter].name} dealt round ${S.roundNo + 1} 🍀`,
@@ -758,6 +786,20 @@ function doDig(idx) {
   publishState();
 }
 
+function actCallRemi() {
+  if (!S || S.phase !== 'playing' || net !== 'on') return;
+  const best = findPileRemi(S.pile);
+  if (!best) { toast('No trio hiding in the pile right now 🙈'); return; }
+  const takeSet = new Set(best.ids);
+  S.pile = S.pile.filter(id => !takeSet.has(id));
+  const a = analyzeIds(best.ids);
+  S.melds.push({ cards: a.ordered.map(c => c.id), by: ME.seat });
+  S.roundPts[ME.seat] += best.val;
+  S.lastAction = `${ME.name} called Remi on ${best.ids.map(cnameId).join(' ')} — straight from the pile! 🍒✨ +${best.val}`;
+  publishState();
+  burstConfetti();
+}
+
 function actLayDown() {
   if (!myTurn() || S.tphase !== 'play' || selection.length < 3) return;
   const a = analyzeIds(selection);
@@ -765,7 +807,8 @@ function actLayDown() {
   const ids = a.ordered.map(c => c.id);
   S.hands[ME.seat] = S.hands[ME.seat].filter(id => !ids.includes(id));
   S.melds.push({ cards: ids, by: ME.seat });
-  S.lastAction = `${ME.name} laid down ${ids.map(cnameId).join(' ')} ✨`;
+  S.roundPts[ME.seat] += ptsOf(ids);
+  S.lastAction = `${ME.name} laid down ${ids.map(cnameId).join(' ')} ✨ +${ptsOf(ids)}`;
   selection = [];
   if (S.mustPlay != null && !S.hands[ME.seat].includes(S.mustPlay)) S.mustPlay = null;
   if (S.hands[ME.seat].length === 0) { winRound(ME.seat); return; }
@@ -787,7 +830,8 @@ function actLayOff(mi) {
   const ids = selection.slice();
   S.hands[ME.seat] = S.hands[ME.seat].filter(id => !ids.includes(id));
   meld.cards = a.ordered.map(c => c.id);
-  S.lastAction = `${ME.name} added ${ids.map(cnameId).join(' ')} to a meld 🌼`;
+  S.roundPts[ME.seat] += ptsOf(ids);
+  S.lastAction = `${ME.name} added ${ids.map(cnameId).join(' ')} to a meld 🌼 +${ptsOf(ids)}`;
   selection = [];
   if (S.mustPlay != null && !S.hands[ME.seat].includes(S.mustPlay)) S.mustPlay = null;
   if (S.hands[ME.seat].length === 0) { winRound(ME.seat); return; }
@@ -817,20 +861,23 @@ function actDiscard() {
 function winRound(seat) {
   const loser = 1 - seat;
   const left = S.hands[loser].slice();
-  const pts = left.reduce((a, id) => a + cardPts(cardOf(id)), 0);
+  S.roundPts[loser] -= ptsOf(left);
   S.hearts[seat]++;
-  S.scores[seat] += pts;
-  S.history.push({ n: S.roundNo, w: seat, pts, left });
+  S.scores[0] += S.roundPts[0];
+  S.scores[1] += S.roundPts[1];
+  S.history.push({ n: S.roundNo, w: seat, gain: S.roundPts.slice(), left });
   if (S.history.length > 200) S.history.shift();
   S.winner = seat;
   S.phase = 'roundOver';
-  S.lastAction = `${S.players[seat].name} went out! 🎉 +${pts} points`;
+  S.lastAction = `${S.players[seat].name} went out! 🎉`;
   publishState();
   burstConfetti();
 }
 
 function endRoundDraw() {
-  S.history.push({ n: S.roundNo, w: -1, pts: 0, left: [] });
+  S.scores[0] += S.roundPts[0];
+  S.scores[1] += S.roundPts[1];
+  S.history.push({ n: S.roundNo, w: -1, gain: S.roundPts.slice(), left: [] });
   if (S.history.length > 200) S.history.shift();
   S.winner = -1;
   S.phase = 'roundOver';
@@ -1150,6 +1197,7 @@ function startJoin(name, avatar, code) {
 function resume() {
   S = lsGet(cacheKey(), null);
   if (S && !S.scores) { S.scores = [0, 0]; S.history = []; }
+  if (S && !S.roundPts) S.roundPts = [0, 0];
   screen = 'game';
   if (S) render(); else renderConnecting('coming back to the table…');
   connect(ME.code, () => {
@@ -1311,7 +1359,10 @@ function renderTable() {
         <div class="plabel">deck</div>
       </div>
       <div class="pilewrap">
-        <div class="plabel" style="margin:0;text-align:left;padding-left:6px;">the pile${S.pile.length ? ` (${S.pile.length}) — tap any card ⛏️` : ''}</div>
+        <div style="display:flex;align-items:center;padding:0 6px;">
+          <div class="plabel" style="margin:0;text-align:left;">the pile${S.pile.length ? ` (${S.pile.length}) ⛏️` : ''}</div>
+          <button class="sortbtn" id="remiCallBtn" style="margin-left:auto;">Remi! 🍒</button>
+        </div>
         ${S.pile.length
           ? `<div class="pilestrip" id="pileStrip">
               ${S.pile.map((pid, i) => {
@@ -1339,6 +1390,7 @@ function renderTable() {
           </button>`).join('')}
     </div>
 
+    ${deckIntact(S) ? '' : `<div class="hint" style="color:var(--pink-deep);">⚠️ the deck looks tangled — fix it with ⚙️ “shuffle & redeal round”</div>`}
     <div class="hint">${hint}</div>
     <div class="actionbar">
       <button class="btn gold" id="layBtn" ${playPhase && selValid ? '' : 'disabled'}>Lay down ✨</button>
@@ -1378,6 +1430,7 @@ function renderTable() {
   if (strip) strip.scrollLeft = strip.scrollWidth;
   $('#layBtn').addEventListener('click', actLayDown);
   $('#discBtn').addEventListener('click', actDiscard);
+  $('#remiCallBtn').addEventListener('click', actCallRemi);
   $('#sortSuit').addEventListener('click', () => sortHand('suit'));
   $('#sortRank').addEventListener('click', () => sortHand('rank'));
   $('#tallyBtn').addEventListener('click', () => { modal = 'score'; renderModal(); });
@@ -1402,15 +1455,16 @@ function renderRoundOver() {
   const myDeal = ME.seat === nextStarter;
   const cap = WIN_CAPTIONS[S.roundNo % WIN_CAPTIONS.length];
   const last = S.history[S.history.length - 1];
-  const fresh = !isDraw && last && last.n === S.roundNo && last.w === w;
-  const pts = fresh ? last.pts : 0;
-  const leftIds = fresh ? last.left : [];
+  const fresh = last && last.n === S.roundNo;
+  const gain = fresh ? (last.gain || [last.w === 0 ? last.pts : 0, last.w === 1 ? last.pts : 0]) : [0, 0];
+  const leftIds = (fresh && !isDraw) ? (last.left || []) : [];
+  const fmt = g => (g < 0 ? '−' : '+') + Math.abs(g);
   app.innerHTML = `
     <div class="screen">
       ${isDraw
         ? `<h2>the deck ran dry 🌫️</h2><p class="sub">nobody's round — shuffle it back 💞</p>`
         : `<h2>${esc(S.players[w].avatar)} ${esc(S.players[w].name)} wins round ${S.roundNo}! 🎉</h2>
-           <p class="sub"><b style="font-family:'Fredoka',ui-rounded,sans-serif;color:var(--pink-deep);">+${pts} points</b>${leftIds.length ? ` — ${esc(S.players[1 - w].name)} was still holding:` : ''}</p>
+           <p class="sub"><b style="font-family:'Fredoka',ui-rounded,sans-serif;color:var(--pink-deep);">${fmt(gain[w])}</b> ${esc(S.players[w].name)} · <b style="font-family:'Fredoka',ui-rounded,sans-serif;">${fmt(gain[1 - w])}</b> ${esc(S.players[1 - w].name)}${leftIds.length ? ` — still holding:` : ''}</p>
            ${leftIds.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;">${leftIds.map(id => {
               const c = cardOf(id);
               return `<span class="mini"><span class="suit-${SUIT_CLASS[c.s]}">${RANKS[c.r]}</span><span class="ms suit-${SUIT_CLASS[c.s]}">${SUITS[c.s]}</span></span>`;
@@ -1456,20 +1510,26 @@ function renderModal() {
           <li>The whole pile is open 👀 — you can <b>dig</b> for any card in it, but you take everything discarded after it too, and the card you dug for <b>must hit the table that same turn</b> ⛏️</li>
           <li>If you take from the pile, you can't throw that same card right back this turn.</li>
           <li><b>Display as you go</b>: lay down <b>runs</b> (3+ in a row, same suit) and <b>sets</b> (3–4 of a rank, different suits) any time it's your turn — tap cards to select, then "Lay down".</li>
-          <li>You can also <b>add cards to any meld</b> on the table — yours or theirs. Select cards, then tap the meld.</li>
+          <li>You can also <b>add cards to any meld</b> on the table — yours or theirs. Select cards, then tap the meld. The points always go to whoever plays the card 💰</li>
+          <li>Spot 3 or 4 of the same card hiding in the pile? Hit <b>Remi! 🍒</b> before your love does — the first caller takes just those cards straight to their table, any time, even off-turn.</li>
           <li>Aces are low or high: A·2·3 and Q·K·A both work. K·A·2 doesn't.</li>
-          <li>Empty your hand to win the round — you score whatever your love was left holding: <b>A = 15</b>, <b>10 · J · Q · K = 10</b>, everything else <b>5</b>.</li>
+          <li>Card points: <b>A = 15</b>, <b>10 · J · Q · K = 10</b>, everything else <b>5</b>. Every card you play to the table earns you its points — and when someone goes out, the cards left in the other's hand count <b>against</b> them.</li>
           <li>No finish line — we play until we're sleepy 🌙 The scoreboard (tap the score up top 🏆) remembers everything.</li>
         </ul>
         <div style="text-align:center;padding-top:14px;"><button class="btn rose" id="mClose">Got it 💕</button></div>
       </div></div>`;
   } else if (modal === 'score') {
-    const rows = S.history.slice().reverse().map(hh => `
+    const fmtG = g => (g < 0 ? '−' : '+') + Math.abs(g);
+    const rows = S.history.slice().reverse().map(hh => {
+      const g = hh.gain || [hh.w === 0 ? hh.pts : 0, hh.w === 1 ? hh.pts : 0];
+      return `
       <tr>
         <td style="padding:6px 10px;color:var(--ink-soft);">${hh.n}</td>
-        <td style="padding:6px 10px;">${hh.w >= 0 ? esc(S.players[hh.w].avatar) + ' ' + esc(S.players[hh.w].name) : '— draw 🌫️'}</td>
-        <td style="padding:6px 10px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums;">${hh.w >= 0 ? '+' + hh.pts : ''}</td>
-      </tr>`).join('');
+        <td style="padding:6px 10px;">${hh.w >= 0 ? esc(S.players[hh.w].avatar) : '🌫️'}</td>
+        <td style="padding:6px 10px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums;">${fmtG(g[0])}</td>
+        <td style="padding:6px 10px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums;">${fmtG(g[1])}</td>
+      </tr>`;
+    }).join('');
     m.innerHTML = `
       <div class="overlay sheet"><div class="sheetcard">
         <h2 style="margin:0 0 12px;font-size:20px;text-align:center;">scoreboard 🏆</h2>
@@ -1487,8 +1547,9 @@ function renderModal() {
             <table style="width:100%;border-collapse:collapse;font-size:13.5px;">
               <thead><tr style="color:var(--ink-soft);font-size:11px;text-transform:uppercase;letter-spacing:1px;">
                 <th style="text-align:left;padding:8px 10px 4px;">round</th>
-                <th style="text-align:left;padding:8px 10px 4px;">winner</th>
-                <th style="text-align:right;padding:8px 10px 4px;">points</th>
+                <th style="text-align:left;padding:8px 10px 4px;">won</th>
+                <th style="text-align:right;padding:8px 10px 4px;">${esc(S.players[0].name)}</th>
+                <th style="text-align:right;padding:8px 10px 4px;">${esc(S.players[1].name)}</th>
               </tr></thead>
               <tbody>${rows}</tbody>
             </table>
@@ -1630,6 +1691,12 @@ window.__remiTest = function () {
   check('dig layoff', canPlayCard(7, [], [{ cards: [4, 5, 6], by: 0 }]), true);
   check('dig layoff bridge', canPlayCard(8, [7], [{ cards: [4, 5, 6], by: 0 }]), true);
   check('dig impossible', canPlayCard(8, [40], []), false);
+  check('pile remi trio', (findPileRemi([4, 17, 30, 40]) || {ids:[]}).ids.length === 3, true);
+  check('pile remi none', findPileRemi([4, 17, 9, 40]) === null, true);
+  check('pile remi four', (findPileRemi([9, 22, 35, 48]) || {ids:[]}).ids.length === 4, true);
+  check('pile remi best', (findPileRemi([4, 17, 30, 12, 25, 38]) || {}).val === 30, true);
+  check('deck intact', deckIntact({ stock: [1, 2], pile: [3], hands: [[4], [5]], melds: [{ cards: [6, 7, 8] }] }), true);
+  check('deck dup detected', deckIntact({ stock: [1, 2], pile: [2], hands: [[], []], melds: [] }), false);
   const failed = results.filter(r => !r.pass);
   return { passed: results.length - failed.length, failed: failed.length, details: results };
 };
@@ -1639,10 +1706,10 @@ window.__remi = {
   get me() { return ME; },
   get net() { return net; },
   get selection() { return selection; },
-  analyzeMeld, canPlayCard, cardOf,
+  analyzeMeld, canPlayCard, findPileRemi, deckIntact, cardOf,
   select(ids) { selection = ids.slice(); render(); },
   forceHand(ids) { S.hands[ME.seat] = ids.slice(); publishState(); },
-  acts: { actDrawStock, actTakePile, actDigPile, doDig, actLayDown, actLayOff, actDiscard, actDealNext },
+  acts: { actDrawStock, actTakePile, actDigPile, doDig, actLayDown, actLayOff, actDiscard, actDealNext, actCallRemi },
   mutate(fn) { fn(S); publishState(); },
   resetTable() {
     const ns = initialState(ME.code, ME.name, ME.avatar);
