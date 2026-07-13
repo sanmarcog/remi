@@ -108,6 +108,10 @@ input { font-family: ui-rounded, -apple-system, sans-serif; color: var(--ink); }
 }
 .tally .tname { max-width: 88px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .tally .hearts { color: var(--pink-deep); letter-spacing: 1px; font-size: 13px; }
+button.tally { background: none; border: none; box-shadow: none; padding: 0; }
+.tally .pts { color: var(--pink-deep); font-weight: 600; font-size: 15px; font-variant-numeric: tabular-nums; }
+.scoreline { font-family: 'Fredoka', ui-rounded, sans-serif; font-size: 16px; }
+.scoreline b { color: var(--pink-deep); font-size: 20px; font-variant-numeric: tabular-nums; }
 .iconbtn {
   width: 36px; height: 36px; border-radius: 50%;
   background: var(--panel); border: 1.5px solid var(--panel-line);
@@ -427,6 +431,7 @@ const HAND_SIZE = 7;
 
 const cardOf = id => ({ id, s: Math.floor(id / 13), r: (id % 13) + 1 });
 const cname = c => RANKS[c.r] + SUITS[c.s];
+const cardPts = c => c.r === 1 ? 15 : c.r >= 10 ? 10 : 5;
 const cnameId = id => cname(cardOf(id));
 
 // A valid meld is a set (3-4 same rank, distinct suits) or a run (3+ same suit,
@@ -475,6 +480,9 @@ const BROKERS = [
 ];
 const WORDS = ['peach', 'tulip', 'honey', 'berry', 'mochi', 'sugar', 'plum', 'daisy', 'cocoa', 'fairy', 'lemon', 'clover', 'pearl', 'bunny', 'cherry', 'petal', 'sunny', 'taffy'];
 
+const HOME_CODE = 'guille-drew-41792';
+const HOME_SEATS = [{ name: 'Guille', avatar: '🦊' }, { name: 'Drew', avatar: '🌷' }];
+
 function makeCode(brokerIdx) {
   const w1 = WORDS[Math.floor(Math.random() * WORDS.length)];
   let w2 = w1;
@@ -518,6 +526,13 @@ function connect(code, onReady, onFail) {
     c.subscribe(topicOf(code), { qos: 0 }, err => {
       if (!settled) { settled = true; onReady && onReady(); }
       sendHb();
+      // after a drop, moves made offline never reached the broker — let the
+      // retained copy arrive first, then push ours (receivers ignore older v)
+      setTimeout(() => {
+        if (net === 'on' && S && ME) {
+          publish({ t: 'state', v: S.v, seat: ME.seat, from: ME.clientId, s: S }, true);
+        }
+      }, 2000);
     });
   });
   c.on('message', (topic, payload) => {
@@ -562,6 +577,7 @@ function handleMsg(m) {
   const prevTurn = S ? S.turn : null;
   const prevPhase = S ? S.phase : null;
   S = m.s;
+  if (!S.scores) { S.scores = [0, 0]; S.history = []; }
   lsSet(cacheKey(), S);
   // a joiner may need to claim their seat
   claimSeatIfNeeded();
@@ -595,10 +611,21 @@ function shuffle(a) {
 }
 
 function initialState(code, name, avatar) {
+  if (code === HOME_CODE) {
+    return {
+      v: 1, code,
+      players: [{ ...HOME_SEATS[0], joined: true }, { ...HOME_SEATS[1], joined: true }],
+      hearts: [0, 0], scores: [0, 0], history: [], roundNo: 0, starter: 0,
+      phase: 'lobby',
+      stock: [], pile: [], hands: [[], []], melds: [],
+      turn: 0, tphase: 'draw', tookFromPile: null,
+      lastAction: null, winner: null,
+    };
+  }
   return {
     v: 1, code,
     players: [{ name, avatar, joined: true }, { name: '', avatar: '🌷', joined: false }],
-    hearts: [0, 0], roundNo: 0, starter: 0,
+    hearts: [0, 0], scores: [0, 0], history: [], roundNo: 0, starter: 0,
     phase: 'lobby',
     stock: [], pile: [], hands: [[], []], melds: [],
     turn: 0, tphase: 'draw', tookFromPile: null,
@@ -703,15 +730,23 @@ function actDiscard() {
 }
 
 function winRound(seat) {
+  const loser = 1 - seat;
+  const left = S.hands[loser].slice();
+  const pts = left.reduce((a, id) => a + cardPts(cardOf(id)), 0);
   S.hearts[seat]++;
+  S.scores[seat] += pts;
+  S.history.push({ n: S.roundNo, w: seat, pts, left });
+  if (S.history.length > 200) S.history.shift();
   S.winner = seat;
-  S.phase = S.hearts[seat] >= WIN_TARGET ? 'matchOver' : 'roundOver';
-  S.lastAction = `${S.players[seat].name} went out! 🎉`;
+  S.phase = 'roundOver';
+  S.lastAction = `${S.players[seat].name} went out! 🎉 +${pts} points`;
   publishState();
   burstConfetti();
 }
 
 function endRoundDraw() {
+  S.history.push({ n: S.roundNo, w: -1, pts: 0, left: [] });
+  if (S.history.length > 200) S.history.shift();
   S.winner = -1;
   S.phase = 'roundOver';
   S.lastAction = 'The deck ran dry — the round is a draw 🌫️';
@@ -729,14 +764,6 @@ function actDealNext() {
   const nextStarter = 1 - S.starter;
   if (ME.seat !== nextStarter) return;
   deal(nextStarter);
-  publishState();
-}
-
-function actRematch() {
-  if (S.phase !== 'matchOver' || ME.seat === S.winner) return;
-  S.hearts = [0, 0];
-  S.roundNo = 0;
-  deal(ME.seat);
   publishState();
 }
 
@@ -888,7 +915,7 @@ async function addPhotoFiles(files) {
 
 /* ============ screens ============ */
 const app = $('#app');
-let screen = 'home'; // home | create | join | game
+let screen = 'home'; // home | custom | create | join | game
 let joinErr = '';
 let modal = null;
 
@@ -896,6 +923,7 @@ function render() {
   if (screen === 'game' && S) { renderGame(); return; }
   if (screen === 'create') { renderNameForm('create'); return; }
   if (screen === 'join') { renderNameForm('join'); return; }
+  if (screen === 'custom') { renderCustomHome(); return; }
   renderHome();
 }
 
@@ -903,15 +931,58 @@ function renderHome() {
   app.innerHTML = `
     <div class="screen">
       <h1 class="titleword">Remi</h1>
-      <p class="sub">one deck, no jokers, 7 sweet cards —<br>play together from anywhere 🌍💕</p>
-      ${polaroidHTML('our table awaits 🍒', false)}
+      <p class="sub">one deck, no jokers, 7 sweet cards —<br>your table is always open 🌍💕</p>
+      ${polaroidHTML('made for you two 🍒', false)}
       <div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:300px;">
-        <button class="bigbtn" id="goCreate">Start our table 🍒</button>
+        <button class="bigbtn" id="beG">I'm Guille 🦊</button>
+        <button class="bigbtn" id="beD">I'm Drew 🌷</button>
+        <button class="btn ghost small" id="goCustom">play at a different table →</button>
+      </div>
+    </div>`;
+  $('#beG').addEventListener('click', () => enterHome(0));
+  $('#beD').addEventListener('click', () => enterHome(1));
+  $('#goCustom').addEventListener('click', () => { screen = 'custom'; render(); });
+}
+
+function enterHome(seat) {
+  const p = HOME_SEATS[seat];
+  ME = { code: HOME_CODE, seat, name: p.name, avatar: p.avatar, clientId: Math.random().toString(36).slice(2, 10), order: [] };
+  lsSet(LS_ID, ME);
+  S = null; gotRemoteState = false;
+  screen = 'game';
+  renderConnecting(seat === 0 ? 'opening our table…' : "finding Guille's table…");
+  connect(HOME_CODE, () => {
+    setTimeout(() => {
+      if (!gotRemoteState) {
+        S = initialState(HOME_CODE, p.name, p.avatar);
+        lsSet(cacheKey(), S);
+        publish({ t: 'state', v: S.v, seat, from: ME.clientId, s: S }, true);
+        render();
+      }
+    }, 2200);
+  }, () => {
+    net = 'idle';
+    localStorage.removeItem(LS_ID);
+    ME = null; S = null; screen = 'home';
+    render();
+    toast("Can't reach the game server — check your internet 🌧");
+  });
+}
+
+function renderCustomHome() {
+  app.innerHTML = `
+    <div class="screen">
+      <h1 class="titleword">Remi</h1>
+      <p class="sub">a table with its own invite code —<br>for adventures beyond you two 🌍</p>
+      <div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:300px;">
+        <button class="bigbtn" id="goCreate">Start a table 🍒</button>
         <button class="btn" id="goJoin" style="padding:13px;">I have an invite code 💌</button>
+        <button class="btn ghost small" id="back">← back</button>
       </div>
     </div>`;
   $('#goCreate').addEventListener('click', () => { screen = 'create'; render(); });
   $('#goJoin').addEventListener('click', () => { screen = 'join'; render(); });
+  $('#back').addEventListener('click', () => { screen = 'home'; render(); });
 }
 
 function renderNameForm(mode) {
@@ -936,7 +1007,7 @@ function renderNameForm(mode) {
     const i = (parseInt(b.dataset.i, 10) + 1) % AV.length;
     b.dataset.i = i; b.textContent = AV[i];
   });
-  $('#back').addEventListener('click', () => { joinErr = ''; screen = 'home'; render(); });
+  $('#back').addEventListener('click', () => { joinErr = ''; screen = 'custom'; render(); });
   $('#go').addEventListener('click', () => {
     const name = $('#nm').value.trim() || (isCreate ? 'Guille' : 'Drew');
     const avatar = $('#av').textContent;
@@ -993,6 +1064,7 @@ function startJoin(name, avatar, code) {
 
 function resume() {
   S = lsGet(cacheKey(), null);
+  if (S && !S.scores) { S.scores = [0, 0]; S.history = []; }
   screen = 'game';
   if (S) render(); else renderConnecting('coming back to the table…');
   connect(ME.code, () => {
@@ -1038,7 +1110,26 @@ function renderGame() {
   renderModal();
 }
 
+function renderHomeLobby() {
+  const other = S.players[1 - ME.seat];
+  app.innerHTML = `
+    <div class="screen">
+      <h2>our table 💕</h2>
+      <p class="sub">${esc(other.avatar)} ${esc(other.name)} <span id="presence" class="presence"></span></p>
+      ${polaroidHTML('game night, worldwide edition 🌍', true)}
+      ${ME.seat === 0
+        ? `<button class="bigbtn" id="dealBtn">Deal round 1 🍒</button>`
+        : `<p class="sub">waiting for ${esc(S.players[0].name)} to deal round 1 🍀<br>(they just need to open the app)</p>`}
+      <button class="btn ghost small" id="leaveBtn">switch player / leave</button>
+    </div>`;
+  renderPresence();
+  const db = $('#dealBtn');
+  if (db) db.addEventListener('click', actDealNext);
+  $('#leaveBtn').addEventListener('click', leaveTable);
+}
+
 function renderLobby() {
+  if (S.code === HOME_CODE) { renderHomeLobby(); return; }
   const iAmHost = ME.seat === 0;
   const p1 = S.players[1];
   app.innerHTML = `
@@ -1104,11 +1195,11 @@ function renderTable() {
     <div class="topbar">
       <span class="title">Remi</span>
       <span id="netdot" class="netdot${net === 'on' ? ' on' : net === 'off' ? ' off' : ''}"></span>
-      <div class="tally">
-        <span class="tname">${esc(S.players[0].name)}</span><span class="hearts">${heartsRow(S.hearts[0])}</span>
+      <button class="tally" id="tallyBtn" aria-label="open scoreboard">
+        <span class="tname">${esc(S.players[0].name)}</span><span class="pts">${S.scores[0]}</span>
         <span style="color:var(--ink-soft)">·</span>
-        <span class="hearts">${heartsRow(S.hearts[1])}</span><span class="tname">${esc(S.players[1].name)}</span>
-      </div>
+        <span class="pts">${S.scores[1]}</span><span class="tname">${esc(S.players[1].name)}</span>
+      </button>
       <button class="iconbtn" id="rulesBtn" aria-label="how to play">💡</button>
       <button class="iconbtn" id="setBtn" aria-label="settings">⚙️</button>
     </div>
@@ -1188,6 +1279,7 @@ function renderTable() {
   $('#discBtn').addEventListener('click', actDiscard);
   $('#sortSuit').addEventListener('click', () => sortHand('suit'));
   $('#sortRank').addEventListener('click', () => sortHand('rank'));
+  $('#tallyBtn').addEventListener('click', () => { modal = 'score'; renderModal(); });
   $('#rulesBtn').addEventListener('click', () => { modal = 'rules'; renderModal(); });
   $('#setBtn').addEventListener('click', () => { modal = 'settings'; renderModal(); });
   document.querySelectorAll('.board .meld').forEach(el => {
@@ -1205,32 +1297,38 @@ function renderTable() {
 function renderRoundOver() {
   const w = S.winner;
   const isDraw = w === -1;
-  const crowned = S.phase === 'matchOver';
   const nextStarter = 1 - S.starter;
-  const myDeal = crowned ? ME.seat !== w : ME.seat === nextStarter;
+  const myDeal = ME.seat === nextStarter;
   const cap = WIN_CAPTIONS[S.roundNo % WIN_CAPTIONS.length];
+  const last = S.history[S.history.length - 1];
+  const fresh = !isDraw && last && last.n === S.roundNo && last.w === w;
+  const pts = fresh ? last.pts : 0;
+  const leftIds = fresh ? last.left : [];
   app.innerHTML = `
     <div class="screen">
-      ${crowned
-        ? `<h2>👑 ${esc(S.players[w].name)} takes the crown!</h2>
-           <p class="sub">${WIN_TARGET} hearts! ${esc(S.players[1 - w].name)} owes a dessert on the next visit 🍰</p>`
-        : isDraw
-          ? `<h2>the deck ran dry 🌫️</h2><p class="sub">nobody's round — shuffle it back 💞</p>`
-          : `<h2>${esc(S.players[w].avatar)} ${esc(S.players[w].name)} wins round ${S.roundNo}! 🎉</h2>`}
-      <p class="sub">${esc(S.players[0].name)} ${heartsRow(S.hearts[0])} · ${heartsRow(S.hearts[1])} ${esc(S.players[1].name)}</p>
+      ${isDraw
+        ? `<h2>the deck ran dry 🌫️</h2><p class="sub">nobody's round — shuffle it back 💞</p>`
+        : `<h2>${esc(S.players[w].avatar)} ${esc(S.players[w].name)} wins round ${S.roundNo}! 🎉</h2>
+           <p class="sub"><b style="font-family:'Fredoka',ui-rounded,sans-serif;color:var(--pink-deep);">+${pts} points</b>${leftIds.length ? ` — ${esc(S.players[1 - w].name)} was still holding:` : ''}</p>
+           ${leftIds.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;">${leftIds.map(id => {
+              const c = cardOf(id);
+              return `<span class="mini"><span class="suit-${SUIT_CLASS[c.s]}">${RANKS[c.r]}</span><span class="ms suit-${SUIT_CLASS[c.s]}">${SUITS[c.s]}</span></span>`;
+            }).join('')}</div>` : ''}`}
+      <div class="scoreline">${esc(S.players[0].name)} <b>${S.scores[0]}</b> · <b>${S.scores[1]}</b> ${esc(S.players[1].name)}</div>
       ${polaroidHTML(isDraw ? 'we blame the cat 🐾' : cap, true)}
-      ${crowned
-        ? (myDeal
-          ? `<button class="bigbtn" id="nextBtn">Demand a rematch 😤💕</button>`
-          : `<p class="sub">waiting to see if ${esc(S.players[1 - w].name)} demands a rematch…</p>`)
-        : (myDeal
-          ? `<button class="bigbtn" id="nextBtn">Deal round ${S.roundNo + 1} 🍒</button>`
-          : `<p class="sub">${esc(S.players[nextStarter].name)} deals the next round 🍀</p>`)}
-      <button class="btn ghost small" id="leaveBtn">leave table</button>
+      ${myDeal
+        ? `<button class="bigbtn" id="nextBtn">Deal round ${S.roundNo + 1} 🍒</button>`
+        : `<p class="sub">${esc(S.players[nextStarter].name)} deals the next round 🍀</p>`}
+      <div style="display:flex;gap:8px;">
+        <button class="btn small" id="boardBtn">Scoreboard 🏆</button>
+        <button class="btn ghost small" id="leaveBtn">leave table</button>
+      </div>
     </div>`;
   const nb = $('#nextBtn');
-  if (nb) nb.addEventListener('click', crowned ? actRematch : actDealNext);
+  if (nb) nb.addEventListener('click', actDealNext);
+  $('#boardBtn').addEventListener('click', () => { modal = 'score'; renderModal(); });
   $('#leaveBtn').addEventListener('click', leaveTable);
+  renderModal();
 }
 
 /* ============ modals ============ */
@@ -1258,9 +1356,42 @@ function renderModal() {
           <li><b>Display as you go</b>: lay down <b>runs</b> (3+ in a row, same suit) and <b>sets</b> (3–4 of a rank, different suits) any time it's your turn — tap cards to select, then "Lay down".</li>
           <li>You can also <b>add cards to any meld</b> on the table — yours or theirs. Select cards, then tap the meld.</li>
           <li>Aces are low or high: A·2·3 and Q·K·A both work. K·A·2 doesn't.</li>
-          <li>First to empty their hand wins the round and a ♥. First to ${WIN_TARGET} ♥ takes the crown 👑</li>
+          <li>Empty your hand to win the round — you score whatever your love was left holding: <b>A = 15</b>, <b>10 · J · Q · K = 10</b>, everything else <b>5</b>.</li>
+          <li>No finish line — we play until we're sleepy 🌙 The scoreboard (tap the score up top 🏆) remembers everything.</li>
         </ul>
         <div style="text-align:center;padding-top:14px;"><button class="btn rose" id="mClose">Got it 💕</button></div>
+      </div></div>`;
+  } else if (modal === 'score') {
+    const rows = S.history.slice().reverse().map(hh => `
+      <tr>
+        <td style="padding:6px 10px;color:var(--ink-soft);">${hh.n}</td>
+        <td style="padding:6px 10px;">${hh.w >= 0 ? esc(S.players[hh.w].avatar) + ' ' + esc(S.players[hh.w].name) : '— draw 🌫️'}</td>
+        <td style="padding:6px 10px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums;">${hh.w >= 0 ? '+' + hh.pts : ''}</td>
+      </tr>`).join('');
+    m.innerHTML = `
+      <div class="overlay sheet"><div class="sheetcard">
+        <h2 style="margin:0 0 12px;font-size:20px;text-align:center;">scoreboard 🏆</h2>
+        <div style="display:flex;justify-content:space-around;text-align:center;padding-bottom:12px;">
+          ${[0, 1].map(i => `
+            <div>
+              <div style="font-size:26px;">${esc(S.players[i].avatar)}</div>
+              <div style="font-family:'Fredoka',ui-rounded,sans-serif;font-weight:600;">${esc(S.players[i].name)}</div>
+              <div style="font-family:'Fredoka',ui-rounded,sans-serif;font-size:30px;font-weight:600;color:var(--pink-deep);font-variant-numeric:tabular-nums;">${S.scores[i]}</div>
+              <div style="font-size:12px;color:var(--ink-soft);">${S.hearts[i]} round${S.hearts[i] === 1 ? '' : 's'} won</div>
+            </div>`).join('')}
+        </div>
+        ${S.history.length ? `
+          <div style="max-height:300px;overflow-y:auto;border-top:1.5px dashed var(--panel-line);">
+            <table style="width:100%;border-collapse:collapse;font-size:13.5px;">
+              <thead><tr style="color:var(--ink-soft);font-size:11px;text-transform:uppercase;letter-spacing:1px;">
+                <th style="text-align:left;padding:8px 10px 4px;">round</th>
+                <th style="text-align:left;padding:8px 10px 4px;">winner</th>
+                <th style="text-align:right;padding:8px 10px 4px;">points</th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>` : `<p class="sub" style="margin:0 auto;text-align:center;">no rounds yet — deal and make history 🍀</p>`}
+        <div style="text-align:center;padding-top:14px;"><button class="btn rose" id="mClose">Done 💕</button></div>
       </div></div>`;
   } else if (modal === 'settings') {
     m.innerHTML = `
@@ -1362,6 +1493,11 @@ window.__remiTest = function () {
   check('set of 5 invalid', analyzeMeld([C(9, 0), C(9, 1), C(9, 2), C(9, 3), { id: 99, r: 9, s: 0 }]).ok, false);
   const ord = analyzeMeld([C(1, 1), C(12, 1), C(13, 1)]);
   check('ace-high ordered last', ord.ok && ord.ordered[2].r === 1, true);
+  check('pts A', cardPts({ r: 1 }) === 15, true);
+  check('pts K', cardPts({ r: 13 }) === 10, true);
+  check('pts 10', cardPts({ r: 10 }) === 10, true);
+  check('pts 9', cardPts({ r: 9 }) === 5, true);
+  check('pts 2', cardPts({ r: 2 }) === 5, true);
   const failed = results.filter(r => !r.pass);
   return { passed: results.length - failed.length, failed: failed.length, details: results };
 };
@@ -1374,7 +1510,13 @@ window.__remi = {
   analyzeMeld, cardOf,
   select(ids) { selection = ids.slice(); render(); },
   forceHand(ids) { S.hands[ME.seat] = ids.slice(); publishState(); },
-  acts: { actDrawStock, actTakePile, actLayDown, actLayOff, actDiscard, actDealNext, actRematch },
+  acts: { actDrawStock, actTakePile, actLayDown, actLayOff, actDiscard, actDealNext },
+  resetTable() {
+    const ns = initialState(ME.code, ME.name, ME.avatar);
+    lsSet(cacheKey(), ns);
+    publish({ t: 'state', v: 1, seat: ME.seat, from: ME.clientId, s: ns }, true);
+    S = ns; render();
+  },
 };
 
 /* ============ boot ============ */
