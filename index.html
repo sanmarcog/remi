@@ -576,6 +576,8 @@ let client = null;
 let net = 'idle'; // idle | connecting | on | off
 let gotRemoteState = false;
 let partnerSeenAt = 0;
+let lastSeenV = 0;         // highest state version ever seen on the wire
+let staleRepairTimer = null;
 let S = null; // shared game state
 
 function cacheKey() { return 'remi.cache.' + (ME ? ME.code : ''); }
@@ -599,13 +601,15 @@ function connect(code, onReady, onFail) {
     c.subscribe(topicOf(code), { qos: 0 }, err => {
       if (!settled) { settled = true; onReady && onReady(); }
       sendHb();
-      // after a drop, moves made offline never reached the broker — let the
-      // retained copy arrive first, then push ours (receivers ignore older v)
+      // after a drop, moves made offline never reached the broker — but only
+      // push ours if we're strictly AHEAD of everything seen on the wire,
+      // otherwise a lagging phone would overwrite the shared save with an
+      // older copy (the game would jump backward on the next reload)
       setTimeout(() => {
-        if (net === 'on' && S && ME) {
+        if (net === 'on' && S && ME && S.v > lastSeenV) {
           publish({ t: 'state', v: S.v, seat: ME.seat, from: ME.clientId, s: S }, true);
         }
-      }, 2000);
+      }, 3000);
     });
   });
   c.on('message', (topic, payload) => {
@@ -637,6 +641,28 @@ function sendHb() { publish({ t: 'hb', seat: ME.seat, from: ME.clientId, name: M
 setInterval(() => { if (client && net === 'on' && ME) sendHb(); }, 20000);
 setInterval(() => { renderPresence(); }, 10000);
 
+// on an equal-version collision, a finished round outranks an unfinished
+// one (someone going out must never be silently undone); otherwise seat 0's
+// copy wins. Both clients apply the same rule, so they converge.
+function equalVTheirsWins(mine, theirs, theirSeat, mySeat) {
+  const mineOver = mine.phase === 'roundOver';
+  const theirsOver = theirs.phase === 'roundOver';
+  if (theirsOver !== mineOver) return theirsOver;
+  return theirSeat === 0 && mySeat !== 0;
+}
+
+// something older than our state is sitting in the retained slot — after a
+// beat, push the truth back so a reload can never resurrect the past
+function scheduleRepublish() {
+  if (net !== 'on') return;
+  clearTimeout(staleRepairTimer);
+  staleRepairTimer = setTimeout(() => {
+    if (net === 'on' && S && ME) {
+      publish({ t: 'state', v: S.v, seat: ME.seat, from: ME.clientId, s: S }, true);
+    }
+  }, 800);
+}
+
 function handleMsg(m) {
   if (!ME) return;
   if (m.from && m.from !== ME.clientId && m.seat !== ME.seat) {
@@ -646,11 +672,11 @@ function handleMsg(m) {
   if (m.t === 'bye' && m.seat !== ME.seat) { partnerSeenAt = 0; renderPresence(); return; }
   if (m.t !== 'state' || !m.s) return;
   gotRemoteState = true;
-  if (S && m.v < S.v) return;
+  lastSeenV = Math.max(lastSeenV, m.v);
+  if (S && m.v < S.v) { scheduleRepublish(); return; }
   if (S && m.v === S.v) {
-    // simultaneous out-of-turn publishes (Remi calls) can collide on a
-    // version; everyone deterministically keeps seat 0's copy
-    if (m.from === ME.clientId || m.seat !== 0 || ME.seat === 0) return;
+    if (m.from === ME.clientId) return;
+    if (!equalVTheirsWins(S, m.s, m.seat, ME.seat)) { scheduleRepublish(); return; }
   }
   const prevTurn = S ? S.turn : null;
   const prevPhase = S ? S.phase : null;
@@ -1200,14 +1226,7 @@ function resume() {
   if (S && !S.roundPts) S.roundPts = [0, 0];
   screen = 'game';
   if (S) render(); else renderConnecting('coming back to the table…');
-  connect(ME.code, () => {
-    setTimeout(() => {
-      // broker lost the retained state (rare) — heal it from our cache
-      if (!gotRemoteState && S) {
-        publish({ t: 'state', v: S.v, seat: ME.seat, from: ME.clientId, s: S }, true);
-      }
-    }, 3000);
-  }, () => { net = 'off'; renderNet(); });
+  connect(ME.code, () => {}, () => { net = 'off'; renderNet(); });
 }
 
 function renderConnecting(msg) {
@@ -1697,6 +1716,10 @@ window.__remiTest = function () {
   check('pile remi best', (findPileRemi([4, 17, 30, 12, 25, 38]) || {}).val === 30, true);
   check('deck intact', deckIntact({ stock: [1, 2], pile: [3], hands: [[4], [5]], melds: [{ cards: [6, 7, 8] }] }), true);
   check('deck dup detected', deckIntact({ stock: [1, 2], pile: [2], hands: [[], []], melds: [] }), false);
+  check('equalv seat0 wins', equalVTheirsWins({ phase: 'playing' }, { phase: 'playing' }, 0, 1), true);
+  check('equalv seat1 loses', equalVTheirsWins({ phase: 'playing' }, { phase: 'playing' }, 1, 0), false);
+  check('equalv win outranks seat', equalVTheirsWins({ phase: 'playing' }, { phase: 'roundOver' }, 1, 0), true);
+  check('equalv my win kept', equalVTheirsWins({ phase: 'roundOver' }, { phase: 'playing' }, 0, 1), false);
   const failed = results.filter(r => !r.pass);
   return { passed: results.length - failed.length, failed: failed.length, details: results };
 };
@@ -1711,6 +1734,8 @@ window.__remi = {
   forceHand(ids) { S.hands[ME.seat] = ids.slice(); publishState(); },
   acts: { actDrawStock, actTakePile, actDigPile, doDig, actLayDown, actLayOff, actDiscard, actDealNext, actCallRemi },
   mutate(fn) { fn(S); publishState(); },
+  get lastSeenV() { return lastSeenV; },
+  publishRaw(s) { publish({ t: 'state', v: s.v, seat: ME.seat, from: ME.clientId, s }, true); },
   resetTable() {
     const ns = initialState(ME.code, ME.name, ME.avatar);
     ns.v = (S ? S.v : 0) + 1000; // outrun any reconnect-heal republishes
