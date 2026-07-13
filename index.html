@@ -188,6 +188,20 @@ button.tally { background: none; border: none; box-shadow: none; padding: 0; }
 @media (prefers-reduced-motion: reduce) {
   .pilebtn.pulse .bigcard { animation: none; box-shadow: 0 0 0 5px var(--glow); }
 }
+.deckcol { flex: none; text-align: center; }
+.deckcol .catmini svg { width: 92px; height: auto; display: block; margin: 0 auto -4px; }
+.pilewrap { flex: 1; min-width: 0; align-self: flex-end; }
+.pilestrip {
+  display: flex; align-items: flex-end;
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+  padding: 6px 4px 4px;
+}
+.pilestrip .pcard { flex: none; margin-left: -22px; background: none; padding: 0; border-radius: 10px; }
+.pilestrip .pcard:first-child { margin-left: 0; }
+.bigcard.small { width: 44px; height: 62px; border-radius: 8px 10px 8px 10px; }
+.bigcard.small .r { font-size: 18px; }
+.bigcard.small .s { font-size: 13px; }
+.card.must { border-color: var(--peach-deep); box-shadow: 0 0 0 3px rgba(242, 145, 61, 0.4); }
 
 /* ---------- melds board ---------- */
 .board {
@@ -458,6 +472,43 @@ function analyzeMeld(cards) {
 }
 const analyzeIds = ids => analyzeMeld(ids.map(cardOf));
 
+// Could `id` be played to the table right now, using `otherIds` (rest of the
+// hand) and the existing melds? Used to vet pile digs before they happen.
+function canPlayCard(id, otherIds, melds) {
+  const X = cardOf(id);
+  const hand = otherIds.map(cardOf);
+  // fresh set: X + 2 same-rank cards of distinct other suits
+  const suits = new Set(hand.filter(c => c.r === X.r && c.s !== X.s).map(c => c.s));
+  if (suits.size >= 2) return true;
+  // fresh run: any 3+ window of consecutive ranks containing X, filled from hand
+  const suitRanks = new Set(hand.filter(c => c.s === X.s).map(c => c.r));
+  const has = r => r === 14 ? suitRanks.has(1) : suitRanks.has(r);
+  for (const xv of (X.r === 1 ? [1, 14] : [X.r])) {
+    for (let len = 3; len <= 13; len++) {
+      for (let start = Math.max(1, xv - len + 1); start <= xv; start++) {
+        const end = start + len - 1;
+        if (end > 14 || (start === 1 && end === 14)) continue;
+        let ok = true;
+        for (let r = start; r <= end && ok; r++) {
+          if (r !== xv && !has(r)) ok = false;
+        }
+        if (ok) return true;
+      }
+    }
+  }
+  // layoff: X alone (or bridged by up to two hand cards) onto any meld
+  for (const m of melds) {
+    if (analyzeIds([...m.cards, id]).ok) return true;
+    for (let i = 0; i < otherIds.length; i++) {
+      if (analyzeIds([...m.cards, id, otherIds[i]]).ok) return true;
+      for (let j = i + 1; j < otherIds.length; j++) {
+        if (analyzeIds([...m.cards, id, otherIds[i], otherIds[j]]).ok) return true;
+      }
+    }
+  }
+  return false;
+}
+
 /* ============ identity & storage ============ */
 const qs = new URLSearchParams(location.search);
 const NS = qs.get('id') ? '.' + qs.get('id') : '';
@@ -618,7 +669,7 @@ function initialState(code, name, avatar) {
       hearts: [0, 0], scores: [0, 0], history: [], roundNo: 0, starter: 0,
       phase: 'lobby',
       stock: [], pile: [], hands: [[], []], melds: [],
-      turn: 0, tphase: 'draw', tookFromPile: null,
+      turn: 0, tphase: 'draw', tookFromPile: null, mustPlay: null,
       lastAction: null, winner: null,
     };
   }
@@ -628,7 +679,7 @@ function initialState(code, name, avatar) {
     hearts: [0, 0], scores: [0, 0], history: [], roundNo: 0, starter: 0,
     phase: 'lobby',
     stock: [], pile: [], hands: [[], []], melds: [],
-    turn: 0, tphase: 'draw', tookFromPile: null,
+    turn: 0, tphase: 'draw', tookFromPile: null, mustPlay: null,
     lastAction: null, winner: null,
   };
 }
@@ -641,7 +692,7 @@ function deal(starter) {
   Object.assign(S, {
     phase: 'playing',
     stock: deck, pile: [flip], hands, melds: [],
-    turn: starter, tphase: 'draw', tookFromPile: null,
+    turn: starter, tphase: 'draw', tookFromPile: null, mustPlay: null,
     starter, winner: null,
     roundNo: S.roundNo + 1,
     lastAction: `${S.players[starter].name} dealt round ${S.roundNo + 1} 🍀`,
@@ -680,6 +731,33 @@ function actTakePile() {
   publishState();
 }
 
+function actDigPile(idx) {
+  if (!myTurn() || S.tphase !== 'draw') return;
+  if (idx < 0 || idx >= S.pile.length - 1) return;
+  const picked = S.pile[idx];
+  const taken = S.pile.slice(idx);
+  const others = [...S.hands[ME.seat], ...taken.filter(x => x !== picked)];
+  if (!canPlayCard(picked, others, S.melds)) {
+    toast(`The ${cnameId(picked)} couldn't hit the table right away — no digging for it 🙅`);
+    return;
+  }
+  modal = { dig: idx };
+  renderModal();
+}
+
+function doDig(idx) {
+  if (!myTurn() || S.tphase !== 'draw' || idx >= S.pile.length - 1) return;
+  const picked = S.pile[idx];
+  const taken = S.pile.slice(idx);
+  S.pile = S.pile.slice(0, idx);
+  S.hands[ME.seat].push(...taken);
+  S.tookFromPile = null;
+  S.mustPlay = picked;
+  S.tphase = 'play';
+  S.lastAction = `${ME.name} dug the ${cnameId(picked)} out of the pile — ${taken.length} cards deep ⛏️`;
+  publishState();
+}
+
 function actLayDown() {
   if (!myTurn() || S.tphase !== 'play' || selection.length < 3) return;
   const a = analyzeIds(selection);
@@ -689,6 +767,7 @@ function actLayDown() {
   S.melds.push({ cards: ids, by: ME.seat });
   S.lastAction = `${ME.name} laid down ${ids.map(cnameId).join(' ')} ✨`;
   selection = [];
+  if (S.mustPlay != null && !S.hands[ME.seat].includes(S.mustPlay)) S.mustPlay = null;
   if (S.hands[ME.seat].length === 0) { winRound(ME.seat); return; }
   publishState();
 }
@@ -710,6 +789,7 @@ function actLayOff(mi) {
   meld.cards = a.ordered.map(c => c.id);
   S.lastAction = `${ME.name} added ${ids.map(cnameId).join(' ')} to a meld 🌼`;
   selection = [];
+  if (S.mustPlay != null && !S.hands[ME.seat].includes(S.mustPlay)) S.mustPlay = null;
   if (S.hands[ME.seat].length === 0) { winRound(ME.seat); return; }
   publishState();
 }
@@ -718,6 +798,10 @@ function actDiscard() {
   if (!myTurn() || S.tphase !== 'play' || selection.length !== 1) return;
   const id = selection[0];
   if (id === S.tookFromPile) { toast('That one just came from the pile — keep it this turn 🫶'); return; }
+  if (S.mustPlay != null && S.hands[ME.seat].includes(S.mustPlay)) {
+    toast(`You dug for the ${cnameId(S.mustPlay)} — it has to hit the table first ⛏️`);
+    return;
+  }
   S.hands[ME.seat] = S.hands[ME.seat].filter(x => x !== id);
   S.pile.push(id);
   S.lastAction = `${ME.name} discarded the ${cnameId(id)} 💌`;
@@ -726,6 +810,7 @@ function actDiscard() {
   S.turn = 1 - S.turn;
   S.tphase = 'draw';
   S.tookFromPile = null;
+  S.mustPlay = null;
   publishState();
 }
 
@@ -1183,10 +1268,13 @@ function renderTable() {
   const drawPhase = mine && S.tphase === 'draw';
   const playPhase = mine && S.tphase === 'play';
   const selValid = selection.length >= 3 && analyzeIds(selection).ok;
+  const mustPending = S.mustPlay != null && S.hands[me].includes(S.mustPlay);
+  const mustCard = mustPending ? cardOf(S.mustPlay) : null;
 
   let hint;
   if (!mine) hint = `<b>${esc(S.players[ot].name)}</b> is thinking… 💭`;
-  else if (drawPhase) hint = `your turn! draw from the deck${top ? ` or take the <b class="suit-${SUIT_CLASS[top.s]}">${cname(top)}</b>` : ''} 🌷`;
+  else if (drawPhase) hint = `your turn! draw from the deck${top ? `, take the <b class="suit-${SUIT_CLASS[top.s]}">${cname(top)}</b>, or dig deeper ⛏️` : ''} 🌷`;
+  else if (mustPending) hint = `play the <b class="suit-${SUIT_CLASS[mustCard.s]}">${cname(mustCard)}</b> to the table before you discard ⛏️`;
   else if (selection.length >= 3) hint = selValid ? `lovely — lay them down! ✨` : `those don't quite fit together 🤔`;
   else if (selection.length) hint = `add to a meld, pick more cards, or discard 💌`;
   else hint = `meld what you can, then discard one 💕`;
@@ -1215,20 +1303,26 @@ function renderTable() {
     </div>
 
     <div class="tablerow">
-      <div class="catwrap">${CAT_SVG}<div class="catlabel">official dealer</div></div>
-      <div class="pile">
+      <div class="deckcol">
+        <div class="catmini">${CAT_SVG}</div>
         <button class="pilebtn ${drawPhase ? 'pulse' : ''}" id="stockBtn" ${drawPhase ? '' : 'disabled'} aria-label="draw from the deck">
           <div class="bigcard back"><span class="cornertag">${S.stock.length}</span></div>
         </button>
         <div class="plabel">deck</div>
       </div>
-      <div class="pile">
-        <button class="pilebtn ${drawPhase && top ? 'pulse' : ''}" id="pileBtn" aria-label="${top ? (drawPhase ? 'take the ' + cname(top) : 'discard pile') : 'discard pile'}">
-          ${top
-            ? `<div class="bigcard">${cardHTML(top)}${S.pile.length > 1 ? `<span class="cornertag">${S.pile.length}</span>` : ''}</div>`
-            : `<div class="bigcard empty">pile</div>`}
-        </button>
-        <div class="plabel">pile</div>
+      <div class="pilewrap">
+        <div class="plabel" style="margin:0;text-align:left;padding-left:6px;">the pile${S.pile.length ? ` (${S.pile.length}) — tap any card ⛏️` : ''}</div>
+        ${S.pile.length
+          ? `<div class="pilestrip" id="pileStrip">
+              ${S.pile.map((pid, i) => {
+                const c = cardOf(pid);
+                const isTop = i === S.pile.length - 1;
+                return `<button class="pilebtn pcard ${drawPhase && isTop ? 'pulse' : ''}" data-idx="${i}" aria-label="${isTop ? 'take the ' + cname(c) : 'dig for the ' + cname(c)}">
+                  <div class="bigcard small">${cardHTML(c)}</div>
+                </button>`;
+              }).join('')}
+            </div>`
+          : `<div class="bigcard empty small" style="margin:8px 6px;">pile</div>`}
       </div>
     </div>
 
@@ -1248,7 +1342,7 @@ function renderTable() {
     <div class="hint">${hint}</div>
     <div class="actionbar">
       <button class="btn gold" id="layBtn" ${playPhase && selValid ? '' : 'disabled'}>Lay down ✨</button>
-      <button class="btn rose" id="discBtn" ${playPhase && selection.length === 1 ? '' : 'disabled'}>Discard 💌</button>
+      <button class="btn rose" id="discBtn" ${playPhase && selection.length === 1 && !mustPending ? '' : 'disabled'}>Discard 💌</button>
     </div>
 
     <div class="handwrap">
@@ -1263,7 +1357,7 @@ function renderTable() {
       </div>
       <div class="hand">
         ${hand.map(c => `
-          <button class="card ${selection.includes(c.id) ? 'sel' : ''}" data-id="${c.id}" aria-label="${cname(c)}${selection.includes(c.id) ? ', selected' : ''}">
+          <button class="card ${selection.includes(c.id) ? 'sel' : ''}${c.id === S.mustPlay ? ' must' : ''}" data-id="${c.id}" aria-label="${cname(c)}${selection.includes(c.id) ? ', selected' : ''}">
             ${cardHTML(c)}
           </button>`).join('')}
       </div>
@@ -1271,10 +1365,17 @@ function renderTable() {
 
   renderPresence();
   $('#stockBtn').addEventListener('click', actDrawStock);
-  $('#pileBtn').addEventListener('click', () => {
-    if (drawPhase) actTakePile();
-    else if (playPhase && selection.length === 1) actDiscard();
+  document.querySelectorAll('.pcard').forEach(el => {
+    el.addEventListener('click', () => {
+      const i = parseInt(el.dataset.idx, 10);
+      if (drawPhase) {
+        if (i === S.pile.length - 1) actTakePile();
+        else actDigPile(i);
+      } else if (playPhase && selection.length === 1) actDiscard();
+    });
   });
+  const strip = $('#pileStrip');
+  if (strip) strip.scrollLeft = strip.scrollWidth;
   $('#layBtn').addEventListener('click', actLayDown);
   $('#discBtn').addEventListener('click', actDiscard);
   $('#sortSuit').addEventListener('click', () => sortHand('suit'));
@@ -1351,7 +1452,8 @@ function renderModal() {
         <h2 style="margin:0 0 4px;font-size:20px;">how we play 💡</h2>
         <ul class="rulelist">
           <li>One deck, <b>no jokers</b>. You each get <b>7 cards</b>; one card starts the pile.</li>
-          <li>On your turn: <b>draw</b> from the deck or take the top of the pile, then play, then <b>discard</b> one.</li>
+          <li>On your turn: <b>draw</b> from the deck or take from the pile, then play, then <b>discard</b> one.</li>
+          <li>The whole pile is open 👀 — you can <b>dig</b> for any card in it, but you take everything discarded after it too, and the card you dug for <b>must hit the table that same turn</b> ⛏️</li>
           <li>If you take from the pile, you can't throw that same card right back this turn.</li>
           <li><b>Display as you go</b>: lay down <b>runs</b> (3+ in a row, same suit) and <b>sets</b> (3–4 of a rank, different suits) any time it's your turn — tap cards to select, then "Lay down".</li>
           <li>You can also <b>add cards to any meld</b> on the table — yours or theirs. Select cards, then tap the meld.</li>
@@ -1392,6 +1494,22 @@ function renderModal() {
             </table>
           </div>` : `<p class="sub" style="margin:0 auto;text-align:center;">no rounds yet — deal and make history 🍀</p>`}
         <div style="text-align:center;padding-top:14px;"><button class="btn rose" id="mClose">Done 💕</button></div>
+      </div></div>`;
+  } else if (modal && modal.dig != null) {
+    const di = modal.dig;
+    const taken = S.pile.slice(di);
+    const picked = S.pile[di];
+    m.innerHTML = `
+      <div class="overlay sheet"><div class="sheetcard" style="text-align:center;">
+        <h2 style="margin:0;font-size:20px;">dig for the ${esc(cnameId(picked))}? ⛏️</h2>
+        <p class="sub" style="margin:8px auto 0;">you'll take all ${taken.length} of these — and the ${esc(cnameId(picked))} must hit the table this turn</p>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;padding:12px 0;">
+          ${taken.map(tid => { const c = cardOf(tid); return `<span class="mini"><span class="suit-${SUIT_CLASS[c.s]}">${RANKS[c.r]}</span><span class="ms suit-${SUIT_CLASS[c.s]}">${SUITS[c.s]}</span></span>`; }).join('')}
+        </div>
+        <div style="display:flex;gap:8px;justify-content:center;">
+          <button class="btn gold" id="digGo">Dig in ⛏️</button>
+          <button class="btn ghost small" id="mClose">never mind</button>
+        </div>
       </div></div>`;
   } else if (modal === 'settings') {
     m.innerHTML = `
@@ -1470,6 +1588,12 @@ function renderModal() {
       }
     });
     m.querySelector('#leaveBtn2').addEventListener('click', () => { closeModal(); leaveTable(); });
+  } else if (modal && modal.dig != null) {
+    m.querySelector('#digGo').addEventListener('click', () => {
+      const di = modal.dig;
+      closeModal();
+      doDig(di);
+    });
   }
 }
 
@@ -1498,6 +1622,14 @@ window.__remiTest = function () {
   check('pts 10', cardPts({ r: 10 }) === 10, true);
   check('pts 9', cardPts({ r: 9 }) === 5, true);
   check('pts 2', cardPts({ r: 2 }) === 5, true);
+  check('dig set ok', canPlayCard(8, [21, 34], []), true);
+  check('dig set short', canPlayCard(8, [21], []), false);
+  check('dig run ok', canPlayCard(6, [4, 5], []), true);
+  check('dig run ace high', canPlayCard(13, [24, 25], []), true);
+  check('dig no wrap', canPlayCard(25, [13, 14], []), false);
+  check('dig layoff', canPlayCard(7, [], [{ cards: [4, 5, 6], by: 0 }]), true);
+  check('dig layoff bridge', canPlayCard(8, [7], [{ cards: [4, 5, 6], by: 0 }]), true);
+  check('dig impossible', canPlayCard(8, [40], []), false);
   const failed = results.filter(r => !r.pass);
   return { passed: results.length - failed.length, failed: failed.length, details: results };
 };
@@ -1507,14 +1639,16 @@ window.__remi = {
   get me() { return ME; },
   get net() { return net; },
   get selection() { return selection; },
-  analyzeMeld, cardOf,
+  analyzeMeld, canPlayCard, cardOf,
   select(ids) { selection = ids.slice(); render(); },
   forceHand(ids) { S.hands[ME.seat] = ids.slice(); publishState(); },
-  acts: { actDrawStock, actTakePile, actLayDown, actLayOff, actDiscard, actDealNext },
+  acts: { actDrawStock, actTakePile, actDigPile, doDig, actLayDown, actLayOff, actDiscard, actDealNext },
+  mutate(fn) { fn(S); publishState(); },
   resetTable() {
     const ns = initialState(ME.code, ME.name, ME.avatar);
+    ns.v = (S ? S.v : 0) + 1000; // outrun any reconnect-heal republishes
     lsSet(cacheKey(), ns);
-    publish({ t: 'state', v: 1, seat: ME.seat, from: ME.clientId, s: ns }, true);
+    publish({ t: 'state', v: ns.v, seat: ME.seat, from: ME.clientId, s: ns }, true);
     S = ns; render();
   },
 };
