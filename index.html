@@ -202,6 +202,17 @@ button.tally { background: none; border: none; box-shadow: none; padding: 0; }
 .bigcard.small .r { font-size: 18px; }
 .bigcard.small .s { font-size: 13px; }
 .card.must { border-color: var(--peach-deep); box-shadow: 0 0 0 3px rgba(242, 145, 61, 0.4); }
+.hand .card { touch-action: none; -webkit-touch-callout: none; }
+.card.dragging { opacity: 0.35; transform: scale(0.95); }
+.dragghost {
+  position: fixed; z-index: 80; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  border-radius: 9px 11px 9px 11px; border: 1.5px solid var(--pink-deep);
+  background: var(--card-face); color: #5C3A5E;
+  font-family: 'Fredoka', ui-rounded, sans-serif;
+  box-shadow: 0 12px 24px rgba(92, 58, 94, 0.35);
+  transform: rotate(-3deg) scale(1.08);
+}
 
 /* ---------- melds board ---------- */
 .board {
@@ -756,6 +767,15 @@ function deal(starter) {
 
 /* ============ my actions ============ */
 let selection = []; // selected card ids in my hand
+let drag = null;    // active hand-card drag: {id, startX, startY, moved, ghost, srcEl}
+let justDragged = false;
+
+function abortDrag() {
+  if (!drag) return;
+  if (drag.ghost) drag.ghost.remove();
+  if (drag.srcEl) drag.srcEl.classList.remove('dragging');
+  drag = null;
+}
 
 const myTurn = () => S && S.phase === 'playing' && S.turn === ME.seat && net === 'on';
 
@@ -1328,6 +1348,7 @@ function leaveTable() {
 }
 
 function renderTable() {
+  abortDrag();
   const me = ME.seat, ot = 1 - me;
   const hand = displayHand().map(cardOf);
   const top = S.pile.length ? cardOf(S.pile[S.pile.length - 1]) : null;
@@ -1460,10 +1481,53 @@ function renderTable() {
   });
   document.querySelectorAll('.hand .card').forEach(el => {
     el.addEventListener('click', () => {
+      if (justDragged) { justDragged = false; return; }
       const id = parseInt(el.dataset.id, 10);
       selection = selection.includes(id) ? selection.filter(x => x !== id) : [...selection, id];
       render();
     });
+    el.addEventListener('pointerdown', e => {
+      abortDrag();
+      drag = { id: parseInt(el.dataset.id, 10), startX: e.clientX, startY: e.clientY, moved: false, ghost: null, srcEl: el };
+      try { el.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    el.addEventListener('pointermove', e => {
+      if (!drag || drag.srcEl !== el) return;
+      if (!drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 8) return;
+      if (!drag.moved) {
+        drag.moved = true;
+        el.classList.add('dragging');
+        const g = el.cloneNode(true);
+        g.className = 'dragghost';
+        g.style.width = el.offsetWidth + 'px';
+        g.style.height = el.offsetHeight + 'px';
+        document.body.appendChild(g);
+        drag.ghost = g;
+      }
+      drag.ghost.style.left = (e.clientX - el.offsetWidth / 2) + 'px';
+      drag.ghost.style.top = (e.clientY - el.offsetHeight * 0.75) + 'px';
+      const over = document.elementFromPoint(e.clientX, e.clientY);
+      const target = over && over.closest ? over.closest('.hand .card') : null;
+      if (target && target !== el && target.parentElement === el.parentElement) {
+        const kids = [...el.parentElement.children];
+        const si = kids.indexOf(el), ti = kids.indexOf(target);
+        el.parentElement.insertBefore(el, si < ti ? target.nextSibling : target);
+      }
+    });
+    el.addEventListener('pointerup', () => {
+      if (!drag || drag.srcEl !== el) return;
+      const moved = drag.moved;
+      const parent = el.parentElement;
+      abortDrag();
+      if (moved) {
+        justDragged = true;
+        setTimeout(() => { justDragged = false; }, 350); // some browsers never fire the post-drag click
+        ME.order = [...parent.children].map(k => parseInt(k.dataset.id, 10));
+        lsSet(LS_ID, ME);
+        render();
+      }
+    });
+    el.addEventListener('pointercancel', () => { abortDrag(); render(); });
   });
 }
 
@@ -1532,6 +1596,7 @@ function renderModal() {
           <li>You can also <b>add cards to any meld</b> on the table — yours or theirs. Select cards, then tap the meld. The points always go to whoever plays the card 💰</li>
           <li>Spot 3 or 4 of the same card hiding in the pile? Hit <b>Remi! 🍒</b> before your love does — the first caller takes just those cards straight to their table, any time, even off-turn.</li>
           <li>Aces are low or high: A·2·3 and Q·K·A both work. K·A·2 doesn't.</li>
+          <li>Arrange your hand however you like — press a card and slide it around 🌈 (the sort buttons are shortcuts). Your love only ever sees card backs.</li>
           <li>Card points: <b>A = 15</b>, <b>10 · J · Q · K = 10</b>, everything else <b>5</b>. Every card you play to the table earns you its points — and when someone goes out, the cards left in the other's hand count <b>against</b> them.</li>
           <li>No finish line — we play until we're sleepy 🌙 The scoreboard (tap the score up top 🏆) remembers everything.</li>
         </ul>
