@@ -1052,6 +1052,21 @@ function actDealNext() {
   publishState();
 }
 
+function actStartFresh() {
+  if (!S || net !== 'on') { toast('Need a connection to restart — try again in a moment 🌧'); return; }
+  S.hearts = [0, 0];
+  S.scores = [0, 0];
+  S.history = [];
+  S.roundNo = 0;
+  deal(ME.seat);
+  // jump far ahead so a phone that was offline with old-game moves can never
+  // out-version the fresh start and resurrect the old match
+  S.v += 999;
+  S.lastAction = `${ME.name} started a brand-new game 🌅`;
+  publishState();
+  toast('Fresh start — everything back to zero 🌅');
+}
+
 function sortHand(mode) {
   const ids = S.hands[ME.seat].slice();
   ids.sort((a, b) => {
@@ -1695,14 +1710,18 @@ function renderRoundOver() {
       ${myDeal
         ? `<button class="bigbtn" id="nextBtn">Deal round ${S.roundNo + 1} 🍒</button>`
         : `<p class="sub">${esc(S.players[nextStarter].name)} deals the next round 🍀</p>`}
-      <div style="display:flex;gap:8px;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
         <button class="btn small" id="boardBtn">Scoreboard 🏆</button>
+        <button class="btn ghost small" id="freshBtn2">start from scratch 🌅</button>
         <button class="btn ghost small" id="leaveBtn">leave table</button>
       </div>
     </div>`;
   const nb = $('#nextBtn');
   if (nb) nb.addEventListener('click', actDealNext);
   $('#boardBtn').addEventListener('click', () => { modal = 'score'; renderModal(); });
+  $('#freshBtn2').addEventListener('click', () => {
+    if (confirm('Start completely fresh? Scores, history and everything go back to zero — for both of you.')) actStartFresh();
+  });
   $('#leaveBtn').addEventListener('click', leaveTable);
   renderModal();
 }
@@ -1823,6 +1842,7 @@ function renderModal() {
           <h3>the table <span style="font-weight:400;color:var(--ink-soft);font-size:12px;">(code: ${esc(ME.code)})</span></h3>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button class="btn small" id="redealBtn">Shuffle & redeal round 🌀</button>
+            <button class="btn small" id="freshBtn">Start from scratch 🌅</button>
             <button class="btn small" id="leaveBtn2">Leave table 👋</button>
           </div>
         </div>
@@ -1872,6 +1892,12 @@ function renderModal() {
         S.roundNo--; deal(S.starter);
         publishState();
         closeModal();
+      }
+    });
+    m.querySelector('#freshBtn').addEventListener('click', () => {
+      if (confirm('Start completely fresh? Scores, history and the current round all go back to zero — for both of you.')) {
+        closeModal();
+        actStartFresh();
       }
     });
     m.querySelector('#leaveBtn2').addEventListener('click', () => { closeModal(); leaveTable(); });
@@ -1945,7 +1971,7 @@ window.__remi = {
   analyzeMeld, canPlayCard, findPileRemi, deckIntact, cardOf,
   select(ids) { selection = ids.slice(); render(); },
   forceHand(ids) { S.hands[ME.seat] = ids.slice(); publishState(); },
-  acts: { actDrawStock, actTakePile, actDigPile, doDig, actLayDown, actLayOff, actDiscard, actDealNext, actCallRemi },
+  acts: { actDrawStock, actTakePile, actDigPile, doDig, actLayDown, actLayOff, actDiscard, actDealNext, actCallRemi, actStartFresh },
   mutate(fn) { fn(S); publishState(); },
   get lastSeenV() { return lastSeenV; },
   get photos() { return photos; },
