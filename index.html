@@ -197,6 +197,7 @@ button.tally { background: none; border: none; box-shadow: none; padding: 0; }
   padding: 6px 4px 4px;
 }
 .pilestrip .pcard { flex: none; background: none; padding: 0; border-radius: 10px; }
+.ownerrow { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .meld .addseg {
   display: flex; align-items: center; gap: 4px;
   margin-left: 4px; padding-left: 8px;
@@ -844,6 +845,8 @@ function actDrawStock() {
   }
   const id = S.stock.pop();
   S.hands[ME.seat].push(id);
+  ME.order = [id, ...(ME.order || [])];
+  lsSet(LS_ID, ME);
   S.tphase = 'play';
   S.lastAction = `${ME.name} drew from the deck 🎴`;
   publishState();
@@ -853,6 +856,8 @@ function actTakePile() {
   if (!myTurn() || S.tphase !== 'draw' || S.pile.length === 0) return;
   const id = S.pile.pop();
   S.hands[ME.seat].push(id);
+  ME.order = [id, ...(ME.order || [])];
+  lsSet(LS_ID, ME);
   S.tookFromPile = id;
   S.tphase = 'play';
   S.lastAction = `${ME.name} took the ${cnameId(id)} from the pile 👀`;
@@ -879,6 +884,8 @@ function doDig(idx) {
   const taken = S.pile.slice(idx);
   S.pile = S.pile.slice(0, idx);
   S.hands[ME.seat].push(...taken);
+  ME.order = [...taken, ...(ME.order || [])];
+  lsSet(LS_ID, ME);
   S.tookFromPile = null;
   S.mustPlay = picked;
   S.tphase = 'play';
@@ -1025,7 +1032,7 @@ function sortHand(mode) {
 function displayHand() {
   const ids = S.hands[ME.seat];
   const pos = new Map((ME.order || []).map((id, i) => [id, i]));
-  return ids.slice().sort((a, b) => (pos.has(a) ? pos.get(a) : 99 + a) - (pos.has(b) ? pos.get(b) : 99 + b));
+  return ids.slice().sort((a, b) => (pos.has(a) ? pos.get(a) : -1000 + ids.indexOf(a)) - (pos.has(b) ? pos.get(b) : -1000 + ids.indexOf(b)));
 }
 
 /* ============ ui helpers ============ */
@@ -1494,12 +1501,16 @@ function renderTable() {
     <div class="board" id="board">
       ${S.melds.length === 0
         ? `<div class="bare">the table is bare — lay down a run or a set, sweetly ✨</div>`
-        : S.melds.map((m, i) => `
-          <button class="meld ${playPhase && selection.length ? 'target' : ''}" data-meld="${i}" aria-label="meld by ${esc(S.players[m.by].name)}">
-            <span class="chip">${esc(S.players[m.by].avatar)}</span>
-            <span class="cards">${m.cards.map(miniHTML).join('')}</span>
-            ${(m.adds || []).map(g => `<span class="addseg"><span class="chip">${esc(S.players[g.by].avatar)}</span><span class="cards">${g.cards.map(miniHTML).join('')}</span></span>`).join('')}
-          </button>`).join('')}
+        : [ot, me].map(gseat => {
+            const group = S.melds.map((m, i) => ({ m, i })).filter(x => x.m.by === gseat);
+            if (!group.length) return '';
+            return `<div class="ownerrow">${group.map(({ m, i }) => `
+              <button class="meld ${playPhase && selection.length ? 'target' : ''}" data-meld="${i}" aria-label="meld by ${esc(S.players[m.by].name)}">
+                <span class="chip">${esc(S.players[m.by].avatar)}</span>
+                <span class="cards">${m.cards.map(miniHTML).join('')}</span>
+                ${(m.adds || []).map(g => `<span class="addseg"><span class="chip">${esc(S.players[g.by].avatar)}</span><span class="cards">${g.cards.map(miniHTML).join('')}</span></span>`).join('')}
+              </button>`).join('')}</div>`;
+          }).join('')}
     </div>
 
     ${deckIntact(S) ? '' : `<div class="hint" style="color:var(--pink-deep);">⚠️ the deck looks tangled — fix it with ⚙️ “shuffle & redeal round”</div>`}
