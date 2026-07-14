@@ -560,7 +560,47 @@ function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return 
 
 let ME = lsGet(LS_ID, null);      // {code, seat, name, avatar, clientId, order:[]}
 let prefs = lsGet(LS_PREFS, { mute: false });
-let photos = lsGet(LS_PHOTOS, []);
+const newPhotoId = () => Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+let photos = lsGet(LS_PHOTOS, []).map(p => typeof p === 'string' ? { id: newPhotoId(), src: p } : p);
+let photoTomb = lsGet(LS_PHOTOS + '.tomb', []);
+const seenPhotoIds = new Set();
+
+function savePhotos() {
+  if (photoTomb.length > 50) photoTomb = photoTomb.slice(-50);
+  lsSet(LS_PHOTOS + '.tomb', photoTomb);
+  return lsSet(LS_PHOTOS, photos);
+}
+
+function publishPhoto(id, obj) {
+  if (!client || net !== 'on' || !ME) return false;
+  try {
+    client.publish(topicOf(ME.code) + '/p/' + id, obj ? JSON.stringify(obj) : '', { qos: 0, retain: true });
+    return true;
+  } catch (e) { return false; }
+}
+
+function handlePhotoMsg(id, payload) {
+  seenPhotoIds.add(id);
+  const raw = payload.toString();
+  if (!raw.length) return;
+  let m;
+  try { m = JSON.parse(raw); } catch (e) { return; }
+  if (m.del) {
+    if (!photoTomb.includes(id)) photoTomb.push(id);
+    const before = photos.length;
+    photos = photos.filter(ph => ph.id !== id);
+    savePhotos();
+    if (photos.length !== before && modal === 'settings') renderModal();
+    return;
+  }
+  if (m.src && !photos.some(ph => ph.id === id) && !photoTomb.includes(id)) {
+    photos.push({ id, src: m.src });
+    photos.sort((a, b) => (a.id < b.id ? -1 : 1));
+    savePhotos();
+    if (modal === 'settings') renderModal();
+    toast('A photo arrived in your shared pocket 📷💕');
+  }
+}
 
 /* ============ networking ============ */
 const BROKERS = [
@@ -615,9 +655,15 @@ function connect(code, onReady, onFail) {
   client = c;
   c.on('connect', () => {
     net = 'on'; renderNet();
-    c.subscribe(topicOf(code), { qos: 0 }, err => {
+    c.subscribe([topicOf(code), topicOf(code) + '/p/+'], { qos: 0 }, err => {
       if (!settled) { settled = true; onReady && onReady(); }
       sendHb();
+      // share any photos (or deletions) the broker doesn't know about yet
+      setTimeout(() => {
+        if (net !== 'on' || !ME) return;
+        photos.forEach(ph => { if (!seenPhotoIds.has(ph.id)) publishPhoto(ph.id, { src: ph.src }); });
+        photoTomb.forEach(tid => { if (!seenPhotoIds.has(tid)) publishPhoto(tid, { del: true }); });
+      }, 3500);
       // after a drop, moves made offline never reached the broker — but only
       // push ours if we're strictly AHEAD of everything seen on the wire,
       // otherwise a lagging phone would overwrite the shared save with an
@@ -630,6 +676,8 @@ function connect(code, onReady, onFail) {
     });
   });
   c.on('message', (topic, payload) => {
+    const pfx = topicOf(code) + '/p/';
+    if (topic.startsWith(pfx)) { handlePhotoMsg(topic.slice(pfx.length), payload); return; }
     let m;
     try { m = JSON.parse(payload.toString()); } catch (e) { return; }
     handleMsg(m);
@@ -1026,10 +1074,10 @@ let photoTick = 0;
 
 function polaroidHTML(caption, tilt) {
   photoTick++;
-  const src = photos.length ? photos[photoTick % photos.length] : null;
+  const src = photos.length ? photos[photoTick % photos.length].src : null;
   const inner = src
     ? `<img class="ph" src="${src}" alt="one of our photos">`
-    : `<div class="phMissing"><div style="transform:scale(1.05)">${CAT_SVG}</div><span>add your photos in ⚙️ —<br>they'll show up here 💕</span></div>`;
+    : `<div class="phMissing"><div style="transform:scale(1.05)">${CAT_SVG}</div><span>add photos in ⚙️ — you'll<br>both see them here 💕</span></div>`;
   return `<div class="polaroid ${tilt ? 'tilt2' : ''}">
     <div class="tape tl"></div><div class="tape tr"></div>
     ${inner}
@@ -1104,12 +1152,16 @@ async function addPhotoFiles(files) {
   for (const f of files) {
     if (photos.length >= 8) { toast('Photo pocket is full (8 max) 📷'); break; }
     try {
-      photos.push(await downscale(f, 640, 0.72));
-      if (!lsSet(LS_PHOTOS, photos)) { photos.pop(); toast('Photo storage is full 🫙'); break; }
+      let src = await downscale(f, 560, 0.7);
+      if (src.length > 140000) src = await downscale(f, 440, 0.6); // keep under relay message limits
+      const id = newPhotoId();
+      photos.push({ id, src });
+      if (!savePhotos()) { photos.pop(); toast('Photo storage is full 🫙'); break; }
+      publishPhoto(id, { src });
       added++;
     } catch (e) { toast("Couldn't read one of the photos 😿"); }
   }
-  if (added) toast(added === 1 ? 'Photo tucked in 💕' : `${added} photos tucked in 💕`);
+  if (added) toast(added === 1 ? 'Photo tucked in — shared with your love 💕' : `${added} photos tucked in — shared with your love 💕`);
   renderModal();
 }
 
@@ -1688,9 +1740,9 @@ function renderModal() {
           </div>
         </div>
         <div class="settingsec">
-          <h3>our photos 📷 <span style="font-weight:400;color:var(--ink-soft);font-size:12px;">(saved on this phone — add them on both!)</span></h3>
+          <h3>our photos 📷 <span style="font-weight:400;color:var(--ink-soft);font-size:12px;">(shared — whatever one of you adds, you both see 💞)</span></h3>
           <div class="photogrid" id="photoGrid">
-            ${photos.map((p, i) => `<div class="photocell"><img src="${p}" alt="photo ${i + 1}"><button class="del" data-i="${i}" aria-label="remove photo">✕</button></div>`).join('')}
+            ${photos.map((p, i) => `<div class="photocell"><img src="${p.src}" alt="photo ${i + 1}"><button class="del" data-i="${i}" aria-label="remove photo">✕</button></div>`).join('')}
             ${photos.length < 8 ? `<button class="addphoto" id="addPhotoBtn">＋</button>` : ''}
           </div>
           <input type="file" id="photoInput" accept="image/*" multiple class="hidden">
@@ -1735,8 +1787,12 @@ function renderModal() {
     inp.addEventListener('change', () => { if (inp.files.length) addPhotoFiles([...inp.files]); });
     m.querySelectorAll('.photocell .del').forEach(b => {
       b.addEventListener('click', () => {
-        photos.splice(parseInt(b.dataset.i, 10), 1);
-        lsSet(LS_PHOTOS, photos);
+        const ph = photos[parseInt(b.dataset.i, 10)];
+        if (!ph) return;
+        photos = photos.filter(x => x.id !== ph.id);
+        if (!photoTomb.includes(ph.id)) photoTomb.push(ph.id);
+        savePhotos();
+        publishPhoto(ph.id, { del: true });
         renderModal();
       });
     });
@@ -1821,6 +1877,7 @@ window.__remi = {
   acts: { actDrawStock, actTakePile, actDigPile, doDig, actLayDown, actLayOff, actDiscard, actDealNext, actCallRemi },
   mutate(fn) { fn(S); publishState(); },
   get lastSeenV() { return lastSeenV; },
+  get photos() { return photos; },
   publishRaw(s) { publish({ t: 'state', v: s.v, seat: ME.seat, from: ME.clientId, s }, true); },
   resetTable() {
     const ns = initialState(ME.code, ME.name, ME.avatar);
