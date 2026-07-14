@@ -464,16 +464,30 @@ const cname = c => RANKS[c.r] + SUITS[c.s];
 const cardPts = c => c.r === 1 ? 15 : c.r >= 10 ? 10 : 5;
 const ptsOf = ids => ids.reduce((a, id) => a + cardPts(cardOf(id)), 0);
 
-// best 3-or-4-of-a-kind hiding anywhere in the pile (Remi call), or null
-function findPileRemi(pile) {
+// best Remi call available in the pile, or null:
+// a 3-4 of a kind hiding anywhere in it (kind 'set'), or one/two pile cards
+// that slot onto an existing table meld (kind 'merge')
+function findPileRemi(pile, melds) {
+  melds = melds || [];
+  let best = null;
+  const consider = c => { if (c && (!best || c.val > best.val)) best = c; };
   const byRank = {};
   pile.forEach(id => { const r = cardOf(id).r; (byRank[r] = byRank[r] || []).push(id); });
-  let best = null;
   for (const r in byRank) {
     const g = byRank[r].slice(0, 4);
-    if (g.length >= 3) {
-      const val = ptsOf(g);
-      if (!best || val > best.val) best = { ids: g, val };
+    if (g.length >= 3) consider({ kind: 'set', ids: g, val: ptsOf(g) });
+  }
+  for (let mi = 0; mi < melds.length; mi++) {
+    const base = meldAllIds(melds[mi]);
+    for (let i = 0; i < pile.length; i++) {
+      if (analyzeIds([...base, pile[i]]).ok) {
+        consider({ kind: 'merge', ids: [pile[i]], meldIdx: mi, val: ptsOf([pile[i]]) });
+      }
+      for (let j = i + 1; j < pile.length; j++) {
+        if (analyzeIds([...base, pile[i], pile[j]]).ok) {
+          consider({ kind: 'merge', ids: [pile[i], pile[j]], meldIdx: mi, val: ptsOf([pile[i], pile[j]]) });
+        }
+      }
     }
   }
   return best;
@@ -895,14 +909,33 @@ function doDig(idx) {
 
 function actCallRemi() {
   if (!S || S.phase !== 'playing' || net !== 'on') return;
-  const best = findPileRemi(S.pile);
-  if (!best) { toast('No trio hiding in the pile right now 🙈'); return; }
+  const best = findPileRemi(S.pile, S.melds);
+  if (!best) { toast('Nothing in the pile to call right now 🙈'); return; }
   const takeSet = new Set(best.ids);
   S.pile = S.pile.filter(id => !takeSet.has(id));
-  const a = analyzeIds(best.ids);
-  S.melds.push({ cards: a.ordered.map(c => c.id), by: ME.seat });
+  if (best.kind === 'set') {
+    const a = analyzeIds(best.ids);
+    S.melds.push({ cards: a.ordered.map(c => c.id), by: ME.seat, adds: [] });
+    S.lastAction = `${ME.name} called Remi on ${best.ids.map(cnameId).join(' ')} — straight from the pile! 🍒✨ +${best.val}`;
+  } else {
+    const meld = S.melds[best.meldIdx];
+    const ids = best.ids.slice().sort((x, y) => cardOf(x).r - cardOf(y).r || cardOf(x).s - cardOf(y).s);
+    meld.adds = meld.adds || [];
+    const own = analyzeIds([...meld.cards, ...ids]);
+    if (ME.seat === meld.by && own.ok) {
+      meld.cards = own.ordered.map(c => c.id);
+    } else {
+      const seg = meld.adds.find(g => g.by === ME.seat);
+      if (seg) {
+        seg.cards.push(...ids);
+        seg.cards.sort((x, y) => cardOf(x).r - cardOf(y).r || cardOf(x).s - cardOf(y).s);
+      } else {
+        meld.adds.push({ by: ME.seat, cards: ids });
+      }
+    }
+    S.lastAction = `${ME.name} called Remi — ${ids.map(cnameId).join(' ')} from the pile onto a meld! 🍒✨ +${best.val}`;
+  }
   S.roundPts[ME.seat] += best.val;
-  S.lastAction = `${ME.name} called Remi on ${best.ids.map(cnameId).join(' ')} — straight from the pile! 🍒✨ +${best.val}`;
   publishState();
   burstConfetti();
 }
@@ -1677,7 +1710,7 @@ function renderModal() {
           <li>If you take from the pile, you can't throw that same card right back this turn.</li>
           <li><b>Display as you go</b>: lay down <b>runs</b> (3+ in a row, same suit) and <b>sets</b> (3–4 of a rank, different suits) any time it's your turn — tap cards to select, then "Lay down".</li>
           <li>You can also <b>add cards to any meld</b> on the table — yours or theirs. Select cards, then tap the meld. The points always go to whoever plays the card 💰</li>
-          <li>Spot 3 or 4 of the same card hiding in the pile? Hit <b>Remi! 🍒</b> before your love does — the first caller takes just those cards straight to their table, any time, even off-turn.</li>
+          <li>Spot something callable in the pile? Hit <b>Remi! 🍒</b> before your love does — 3 or 4 of the same card hiding in there, or <b>one or two pile cards that fit an existing meld</b>. The first caller takes just those cards straight to the table, any time, even off-turn.</li>
           <li>Aces are low or high: A·2·3 and Q·K·A both work. K·A·2 doesn't.</li>
           <li>Arrange your hand however you like — press a card and slide it around 🌈 (the sort buttons are shortcuts). Your love only ever sees card backs.</li>
           <li>Card points: <b>A = 15</b>, <b>10 · J · Q · K = 10</b>, everything else <b>5</b>. Every card you play to the table earns you its points — and when someone goes out, the cards left in the other's hand count <b>against</b> them.</li>
@@ -1867,6 +1900,11 @@ window.__remiTest = function () {
   check('pile remi none', findPileRemi([4, 17, 9, 40]) === null, true);
   check('pile remi four', (findPileRemi([9, 22, 35, 48]) || {ids:[]}).ids.length === 4, true);
   check('pile remi best', (findPileRemi([4, 17, 30, 12, 25, 38]) || {}).val === 30, true);
+  check('pile remi merge one', (findPileRemi([7, 40], [{ cards: [4, 5, 6], by: 0 }]) || {}).kind === 'merge', true);
+  check('pile remi merge two', ((findPileRemi([7, 8], [{ cards: [4, 5, 6], by: 0 }]) || { ids: [] }).ids.length === 2), true);
+  check('pile remi merge through adds', (findPileRemi([8], [{ cards: [4, 5, 6], by: 0, adds: [{ by: 1, cards: [7] }] }]) || {}).kind === 'merge', true);
+  check('pile remi no merge', findPileRemi([40], [{ cards: [4, 5, 6], by: 0 }]) === null, true);
+  check('pile remi set beats small merge', (findPileRemi([12, 25, 38, 7], [{ cards: [4, 5, 6], by: 0 }]) || {}).kind === 'set', true);
   check('deck intact', deckIntact({ stock: [1, 2], pile: [3], hands: [[4], [5]], melds: [{ cards: [6, 7, 8] }] }), true);
   check('deck dup detected', deckIntact({ stock: [1, 2], pile: [2], hands: [[], []], melds: [] }), false);
   check('equalv seat0 wins', equalVTheirsWins({ phase: 'playing' }, { phase: 'playing' }, 0, 1), true);
