@@ -192,12 +192,16 @@ button.tally { background: none; border: none; box-shadow: none; padding: 0; }
 .deckcol .catmini svg { width: 92px; height: auto; display: block; margin: 0 auto -4px; }
 .pilewrap { flex: 1; min-width: 0; align-self: flex-end; }
 .pilestrip {
-  display: flex; align-items: flex-end;
+  display: flex; align-items: flex-end; gap: 4px;
   overflow-x: auto; -webkit-overflow-scrolling: touch;
   padding: 6px 4px 4px;
 }
-.pilestrip .pcard { flex: none; margin-left: -22px; background: none; padding: 0; border-radius: 10px; }
-.pilestrip .pcard:first-child { margin-left: 0; }
+.pilestrip .pcard { flex: none; background: none; padding: 0; border-radius: 10px; }
+.meld .addseg {
+  display: flex; align-items: center; gap: 4px;
+  margin-left: 4px; padding-left: 8px;
+  border-left: 1.5px dashed var(--panel-line);
+}
 .bigcard.small { width: 44px; height: 62px; border-radius: 8px 10px 8px 10px; }
 .bigcard.small .r { font-size: 18px; }
 .bigcard.small .s { font-size: 13px; }
@@ -476,7 +480,7 @@ function findPileRemi(pile) {
 
 // every card should exist in exactly one place (one deck, no duplicates)
 function deckIntact(s) {
-  const all = [...s.stock, ...s.pile, ...s.hands[0], ...s.hands[1], ...s.melds.flatMap(m => m.cards)];
+  const all = [...s.stock, ...s.pile, ...s.hands[0], ...s.hands[1], ...s.melds.flatMap(m => meldAllIds(m))];
   return new Set(all).size === all.length;
 }
 const cnameId = id => cname(cardOf(id));
@@ -504,6 +508,7 @@ function analyzeMeld(cards) {
   return { ok: false };
 }
 const analyzeIds = ids => analyzeMeld(ids.map(cardOf));
+const meldAllIds = m => (m.adds && m.adds.length) ? m.cards.concat(...m.adds.map(g => g.cards)) : m.cards;
 
 // Could `id` be played to the table right now, using `otherIds` (rest of the
 // hand) and the existing melds? Used to vet pile digs before they happen.
@@ -531,11 +536,12 @@ function canPlayCard(id, otherIds, melds) {
   }
   // layoff: X alone (or bridged by up to two hand cards) onto any meld
   for (const m of melds) {
-    if (analyzeIds([...m.cards, id]).ok) return true;
+    const base = meldAllIds(m);
+    if (analyzeIds([...base, id]).ok) return true;
     for (let i = 0; i < otherIds.length; i++) {
-      if (analyzeIds([...m.cards, id, otherIds[i]]).ok) return true;
+      if (analyzeIds([...base, id, otherIds[i]]).ok) return true;
       for (let j = i + 1; j < otherIds.length; j++) {
-        if (analyzeIds([...m.cards, id, otherIds[i], otherIds[j]]).ok) return true;
+        if (analyzeIds([...base, id, otherIds[i], otherIds[j]]).ok) return true;
       }
     }
   }
@@ -866,16 +872,28 @@ function actLayOff(mi) {
   if (!selection.length) { toast('Tap cards in your hand first, then the meld 🌷'); return; }
   const meld = S.melds[mi];
   if (!meld) return;
-  const a = analyzeIds([...meld.cards, ...selection]);
+  const a = analyzeIds([...meldAllIds(meld), ...selection]);
   if (!a.ok) {
     const el = document.querySelector(`[data-meld="${mi}"]`);
     if (el) { el.classList.add('no'); setTimeout(() => el.classList.remove('no'), 700); }
     toast("Those don't fit on that meld 🙈");
     return;
   }
-  const ids = selection.slice();
+  const ids = selection.slice().sort((x, y) => cardOf(x).r - cardOf(y).r || cardOf(x).s - cardOf(y).s);
   S.hands[ME.seat] = S.hands[ME.seat].filter(id => !ids.includes(id));
-  meld.cards = a.ordered.map(c => c.id);
+  meld.adds = meld.adds || [];
+  const own = analyzeIds([...meld.cards, ...ids]);
+  if (ME.seat === meld.by && own.ok) {
+    meld.cards = own.ordered.map(c => c.id); // extending your own meld just grows it
+  } else {
+    const seg = meld.adds.find(g => g.by === ME.seat);
+    if (seg) {
+      seg.cards.push(...ids);
+      seg.cards.sort((x, y) => cardOf(x).r - cardOf(y).r || cardOf(x).s - cardOf(y).s);
+    } else {
+      meld.adds.push({ by: ME.seat, cards: ids });
+    }
+  }
   S.roundPts[ME.seat] += ptsOf(ids);
   S.lastAction = `${ME.name} added ${ids.map(cnameId).join(' ')} to a meld 🌼 +${ptsOf(ids)}`;
   selection = [];
@@ -976,6 +994,10 @@ function toast(msg) {
 }
 
 const heartsRow = n => n === 0 ? '·' : '♥'.repeat(Math.min(n, WIN_TARGET));
+function miniHTML(id) {
+  const c = cardOf(id);
+  return `<span class="mini"><span class="suit-${SUIT_CLASS[c.s]}">${RANKS[c.r]}</span><span class="ms suit-${SUIT_CLASS[c.s]}">${SUITS[c.s]}</span></span>`;
+}
 const cardHTML = c => `<span class="r suit-${SUIT_CLASS[c.s]}">${RANKS[c.r]}</span><span class="s suit-${SUIT_CLASS[c.s]}">${SUITS[c.s]}</span>`;
 
 const CAT_SVG = `
@@ -1423,10 +1445,8 @@ function renderTable() {
         : S.melds.map((m, i) => `
           <button class="meld ${playPhase && selection.length ? 'target' : ''}" data-meld="${i}" aria-label="meld by ${esc(S.players[m.by].name)}">
             <span class="chip">${esc(S.players[m.by].avatar)}</span>
-            <span class="cards">${m.cards.map(id => {
-              const c = cardOf(id);
-              return `<span class="mini"><span class="suit-${SUIT_CLASS[c.s]}">${RANKS[c.r]}</span><span class="ms suit-${SUIT_CLASS[c.s]}">${SUITS[c.s]}</span></span>`;
-            }).join('')}</span>
+            <span class="cards">${m.cards.map(miniHTML).join('')}</span>
+            ${(m.adds || []).map(g => `<span class="addseg"><span class="chip">${esc(S.players[g.by].avatar)}</span><span class="cards">${g.cards.map(miniHTML).join('')}</span></span>`).join('')}
           </button>`).join('')}
     </div>
 
@@ -1774,6 +1794,7 @@ window.__remiTest = function () {
   check('dig no wrap', canPlayCard(25, [13, 14], []), false);
   check('dig layoff', canPlayCard(7, [], [{ cards: [4, 5, 6], by: 0 }]), true);
   check('dig layoff bridge', canPlayCard(8, [7], [{ cards: [4, 5, 6], by: 0 }]), true);
+  check('layoff through adds', canPlayCard(8, [], [{ cards: [4, 5, 6], by: 0, adds: [{ by: 1, cards: [7] }] }]), true);
   check('dig impossible', canPlayCard(8, [40], []), false);
   check('pile remi trio', (findPileRemi([4, 17, 30, 40]) || {ids:[]}).ids.length === 3, true);
   check('pile remi none', findPileRemi([4, 17, 9, 40]) === null, true);
