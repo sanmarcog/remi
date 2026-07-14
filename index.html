@@ -192,11 +192,12 @@ button.tally { background: none; border: none; box-shadow: none; padding: 0; }
 .deckcol .catmini svg { width: 92px; height: auto; display: block; margin: 0 auto -4px; }
 .pilewrap { flex: 1; min-width: 0; align-self: flex-end; }
 .pilestrip {
-  display: flex; align-items: flex-end; gap: 4px;
+  display: flex; align-items: flex-end;
   overflow-x: auto; -webkit-overflow-scrolling: touch;
   padding: 6px 4px 4px;
 }
-.pilestrip .pcard { flex: none; background: none; padding: 0; border-radius: 10px; }
+.pilestrip .pcard { flex: none; margin-left: -5px; background: none; padding: 0; border-radius: 10px; }
+.pilestrip .pcard:first-child { margin-left: 0; }
 .ownerrow { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .meld .addseg {
   display: flex; align-items: center; gap: 4px;
@@ -1622,12 +1623,33 @@ function renderTable() {
       }
       drag.ghost.style.left = (e.clientX - el.offsetWidth / 2) + 'px';
       drag.ghost.style.top = (e.clientY - el.offsetHeight * 0.75) + 'px';
-      const over = document.elementFromPoint(e.clientX, e.clientY);
-      const target = over && over.closest ? over.closest('.hand .card') : null;
-      if (target && target !== el && target.parentElement === el.parentElement) {
-        const kids = [...el.parentElement.children];
-        const si = kids.indexOf(el), ti = kids.indexOf(target);
-        el.parentElement.insertBefore(el, si < ti ? target.nextSibling : target);
+      // never detach the held card — re-inserting it would release pointer
+      // capture on real phones and kill the drag after one step. Its
+      // neighbors hop over it instead, which also preserves their order.
+      const parent = el.parentElement;
+      const kids = [...parent.children];
+      const si = kids.indexOf(el);
+      let ti = kids.findIndex(k => {
+        const r = k.getBoundingClientRect();
+        return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top - 10 && e.clientY <= r.bottom + 10;
+      });
+      if (ti < 0) {
+        const first = kids[0].getBoundingClientRect();
+        const last = kids[kids.length - 1].getBoundingClientRect();
+        if (e.clientY > last.bottom + 10 || (e.clientY >= last.top - 10 && e.clientX > last.right)) ti = kids.length - 1;
+        else if (e.clientY < first.top - 10 || (e.clientY <= first.bottom + 10 && e.clientX < first.left)) ti = 0;
+      }
+      if (ti >= 0 && ti !== si) {
+        let cur = si;
+        while (cur !== ti) {
+          const ks = [...parent.children];
+          const dir = ti > cur ? 1 : -1;
+          const neighbor = ks[cur + dir];
+          if (!neighbor || neighbor === el) break;
+          if (dir > 0) parent.insertBefore(neighbor, el);
+          else parent.insertBefore(neighbor, el.nextSibling);
+          cur += dir;
+        }
       }
     });
     el.addEventListener('pointerup', () => {
