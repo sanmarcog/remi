@@ -826,10 +826,10 @@ function deal(starter) {
   Object.assign(S, {
     phase: 'playing',
     stock: deck, pile: [flip], hands, melds: [],
-    turn: starter, tphase: 'draw', tookFromPile: null, mustPlay: null, roundPts: [0, 0],
+    turn: 1 - starter, tphase: 'draw', tookFromPile: null, mustPlay: null, roundPts: [0, 0],
     starter, winner: null,
     roundNo: S.roundNo + 1,
-    lastAction: `${S.players[starter].name} dealt round ${S.roundNo + 1} 🍀`,
+    lastAction: `${S.players[starter].name} dealt round ${S.roundNo + 1} 🍀 — ${S.players[1 - starter].name} goes first`,
   });
   selection = [];
 }
@@ -1743,7 +1743,7 @@ function renderModal() {
       <div class="overlay sheet"><div class="sheetcard">
         <h2 style="margin:0 0 4px;font-size:20px;">how we play 💡</h2>
         <ul class="rulelist">
-          <li>One deck, <b>no jokers</b>. You each get <b>7 cards</b>; one card starts the pile.</li>
+          <li>One deck, <b>no jokers</b>. You each get <b>7 cards</b>; one card starts the pile. Whoever deals, <b>the other goes first</b>.</li>
           <li>On your turn: <b>draw</b> from the deck or take from the pile, then play, then <b>discard</b> one.</li>
           <li>The whole pile is open 👀 — you can <b>dig</b> for any card in it, but you take everything discarded after it too, and the card you dug for <b>must hit the table that same turn</b> ⛏️</li>
           <li>If you take from the pile, you can't throw that same card right back this turn.</li>
