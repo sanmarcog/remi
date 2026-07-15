@@ -581,6 +581,7 @@ let photoTomb = lsGet(LS_PHOTOS + '.tomb', []);
 const seenPhotoIds = new Set();
 
 function savePhotos() {
+  photos.sort((a, b) => (a.id < b.id ? -1 : 1));
   if (photoTomb.length > 50) photoTomb = photoTomb.slice(-50);
   lsSet(LS_PHOTOS + '.tomb', photoTomb);
   return lsSet(LS_PHOTOS, photos);
@@ -1104,7 +1105,7 @@ function miniHTML(id) {
 const cardHTML = c => `<span class="r suit-${SUIT_CLASS[c.s]}">${RANKS[c.r]}</span><span class="s suit-${SUIT_CLASS[c.s]}">${SUITS[c.s]}</span>`;
 
 const CAT_SVG = `
-<svg width="128" height="74" viewBox="0 0 128 74" aria-label="a fluffy orange cat, the official dealer" role="img">
+<svg width="128" height="74" viewBox="0 0 128 74" aria-label="Olly the cat, official dealer" role="img">
   <ellipse cx="58" cy="56" rx="42" ry="17" fill="#F2A45C"/>
   <path d="M22 56 q-14 2 -12 12 q10 4 20 -4" fill="#F2A45C"/>
   <path d="M30 48 q6 -8 16 -8 M46 44 q8 -6 16 -5 M66 44 q8 -4 14 0" stroke="#DE8B3F" stroke-width="3" fill="none" stroke-linecap="round"/>
@@ -1123,13 +1124,18 @@ const CAT_SVG = `
   <path d="M86 30 q6 -5 12 0" stroke="#DE8B3F" stroke-width="2.4" fill="none" stroke-linecap="round"/>
 </svg>`;
 
-const WAIT_CAPTIONS = ['thinking of you 💭', 'miss you, play faster 💕', 'long distance, short game 🌍', 'the cat says hi 🐾', 'good luck, cutie ✨'];
-const WIN_CAPTIONS = ['what a hand! 🌟', 'card shark alert 🦈💕', 'the cat is impressed 🐾', 'flawless victory 🌷'];
+const WAIT_CAPTIONS = ['thinking of you 💭', 'miss you, play faster 💕', 'long distance, short game 🌍', 'Olly says hi 🐾', 'good luck, cutie ✨'];
+const WIN_CAPTIONS = ['what a hand! 🌟', 'card shark alert 🦈💕', 'Olly is impressed 🐾', 'flawless victory 🌷'];
 let photoTick = 0;
 
 function polaroidHTML(caption, tilt) {
   photoTick++;
-  const src = photos.length ? photos[photoTick % photos.length].src : null;
+  let src = null;
+  if (photos.length) {
+    // derive the pick from shared state so both phones show the SAME photo
+    const idx = S ? (S.roundNo || 0) % photos.length : photoTick % photos.length;
+    src = photos[idx].src;
+  }
   const inner = src
     ? `<img class="ph" src="${src}" alt="one of our photos">`
     : `<div class="phMissing"><div style="transform:scale(1.05)">${CAT_SVG}</div><span>add photos in ⚙️ — you'll<br>both see them here 💕</span></div>`;
@@ -1522,6 +1528,7 @@ function renderTable() {
     <div class="tablerow">
       <div class="deckcol">
         <div class="catmini">${CAT_SVG}</div>
+        <div class="plabel" style="margin:-2px 0 3px;">Olly 🐾</div>
         <button class="pilebtn ${drawPhase ? 'pulse' : ''}" id="stockBtn" ${drawPhase ? '' : 'disabled'} aria-label="draw from the deck">
           <div class="bigcard back"><span class="cornertag">${S.stock.length}</span></div>
         </button>
@@ -1704,7 +1711,7 @@ function renderRoundOver() {
               return `<span class="mini"><span class="suit-${SUIT_CLASS[c.s]}">${RANKS[c.r]}</span><span class="ms suit-${SUIT_CLASS[c.s]}">${SUITS[c.s]}</span></span>`;
             }).join('')}</div>` : ''}`}
       <div class="scoreline">${esc(S.players[0].name)} <b>${S.scores[0]}</b> · <b>${S.scores[1]}</b> ${esc(S.players[1].name)}</div>
-      ${polaroidHTML(isDraw ? 'we blame the cat 🐾' : cap, true)}
+      ${polaroidHTML(isDraw ? 'we blame Olly 🐾' : cap, true)}
       ${myDeal
         ? `<button class="bigbtn" id="nextBtn">Deal round ${S.roundNo + 1} 🍒</button>`
         : `<p class="sub">${esc(S.players[nextStarter].name)} deals the next round 🍀</p>`}
