@@ -145,7 +145,7 @@ button.tally { background: none; border: none; box-shadow: none; padding: 0; }
 .presence.away { color: var(--ink-soft); }
 
 /* ---------- piles row ---------- */
-.tablerow { display: flex; align-items: flex-end; justify-content: center; gap: 20px; padding: 10px 0 4px; }
+.tablerow { display: flex; align-items: flex-start; justify-content: center; gap: 10px; padding: 10px 0 4px; }
 .catwrap { text-align: center; line-height: 1; transform: scale(0.82); transform-origin: bottom center; }
 .catwrap .catlabel {
   font-size: 11px; color: var(--ink-soft); font-family: 'Fredoka', ui-rounded, sans-serif;
@@ -190,10 +190,10 @@ button.tally { background: none; border: none; box-shadow: none; padding: 0; }
 }
 .deckcol { flex: none; text-align: center; }
 .deckcol .catmini svg { width: 92px; height: auto; display: block; margin: 0 auto -4px; }
-.pilewrap { flex: 1; min-width: 0; align-self: center; }
+.pilewrap { flex: 1; min-width: 0; align-self: flex-start; }
 .pilestrip {
   display: flex; flex-wrap: wrap; align-items: flex-start; row-gap: 5px;
-  width: 100%; padding: 4px 2px 4px 12px;
+  width: 100%; padding: 4px 2px 4px 10px;
 }
 .pilestrip .pcard { flex: none; margin-left: -8px; background: none; padding: 0; border-radius: 10px; }
 .pilestrip .pcard:first-child { margin-left: 0; }
@@ -1539,20 +1539,19 @@ function renderTable() {
           <div class="plabel" style="margin:0;text-align:left;">the pile${S.pile.length ? ` (${S.pile.length}) ⛏️` : ''}</div>
           <button class="sortbtn" id="remiCallBtn" style="margin-left:auto;">Remi! 🍒</button>
         </div>
-        ${S.pile.length ? '' : `<div class="bigcard empty small" style="margin:8px 6px;">pile</div>`}
+        ${S.pile.length
+          ? `<div class="pilestrip" id="pileStrip">
+              ${S.pile.map((pid, i) => {
+                const c = cardOf(pid);
+                const isTop = i === S.pile.length - 1;
+                return `<button class="pilebtn pcard ${drawPhase && isTop ? 'pulse' : ''}" data-idx="${i}" aria-label="${isTop ? 'take the ' + cname(c) : 'dig for the ' + cname(c)}">
+                  <div class="bigcard small">${cardHTML(c)}</div>
+                </button>`;
+              }).join('')}
+            </div>`
+          : `<div class="bigcard empty small" style="margin:8px 6px;">pile</div>`}
       </div>
     </div>
-    ${S.pile.length
-      ? `<div class="pilestrip" id="pileStrip">
-          ${S.pile.map((pid, i) => {
-            const c = cardOf(pid);
-            const isTop = i === S.pile.length - 1;
-            return `<button class="pilebtn pcard ${drawPhase && isTop ? 'pulse' : ''}" data-idx="${i}" aria-label="${isTop ? 'take the ' + cname(c) : 'dig for the ' + cname(c)}">
-              <div class="bigcard small">${cardHTML(c)}</div>
-            </button>`;
-          }).join('')}
-        </div>`
-      : ''}
 
     <div class="board" id="board">
       ${S.melds.length === 0
